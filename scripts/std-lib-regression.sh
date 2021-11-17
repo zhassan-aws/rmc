@@ -36,7 +36,7 @@ if [ -d std_lib_test ]
 then
     rm -rf std_lib_test
 fi
-cargo new std_lib_test --lib
+cargo new std_lib_test --lib --edition 2018
 cd std_lib_test
 
 # Check that we have the nighly toolchain, which is required for -Z build-std
