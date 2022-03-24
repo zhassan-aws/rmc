@@ -3,7 +3,7 @@
 use super::typ::{is_pointer, pointee_type, TypeExt};
 use crate::codegen_cprover_gotoc::utils::{dynamic_fat_ptr, slice_fat_ptr};
 use crate::codegen_cprover_gotoc::{GotocCtx, VtableCtx};
-use cbmc::goto_program::{Expr, Location, Stmt, Symbol, Type};
+use cbmc::goto_program::{CIntType, Expr, Location, Stmt, Symbol, Type};
 use cbmc::utils::BUG_REPORT_URL;
 use cbmc::MachineModel;
 use cbmc::NO_PRETTY_NAME;
@@ -315,7 +315,13 @@ impl<'tcx> GotocCtx<'tcx> {
             BinOp::Offset => {
                 let ce1 = self.codegen_operand(e1);
                 let ce2 = self.codegen_operand(e2);
-                ce1.plus(ce2)
+
+                let signed_ce2 = match ce2.clone().typ() {
+                    Type::Unsignedbv { width } => ce2.cast_to(Type::signed_int(*width)),
+                    Type::CInteger(CIntType::SizeT) => ce2.cast_to(Type::ssize_t()),
+                    _ => ce2,
+                };
+                ce1.plus(signed_ce2)
             }
         }
     }

@@ -551,6 +551,14 @@ impl Type {
         }
     }
 
+    /// Is a signed integer type suitable as a pointer offset
+    pub fn is_signed_integer(&self) -> bool {
+        match self {
+            CInteger(CIntType::SSizeT) | Signedbv { .. } => true,
+            _ => false,
+        }
+    }
+
     /// This is a struct (and not an incomplete struct or struct tag)
     pub fn is_struct(&self) -> bool {
         match self {

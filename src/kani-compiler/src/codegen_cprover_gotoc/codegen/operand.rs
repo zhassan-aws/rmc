@@ -146,7 +146,7 @@ impl<'tcx> GotocCtx<'tcx> {
                     .codegen_allocation_auto_imm_name(alloc.inner(), |tcx| tcx.next_global_name());
                 mem_var
                     .cast_to(Type::unsigned_int(8).to_pointer())
-                    .plus(Expr::int_constant(offset.bytes(), Type::unsigned_int(64)))
+                    .plus(Expr::int_constant(offset.bytes(), Type::signed_int(64)))
                     .cast_to(self.codegen_ty(lit_ty).to_pointer())
                     .dereference()
             }
@@ -395,7 +395,7 @@ impl<'tcx> GotocCtx<'tcx> {
         assert!(res_t.is_pointer() || res_t.is_transparent_type(&self.symbol_table));
         let offset_addr = base_addr
             .cast_to(Type::unsigned_int(8).to_pointer())
-            .plus(Expr::int_constant(offset.bytes(), Type::unsigned_int(64)));
+            .plus(Expr::int_constant(offset.bytes(), Type::signed_int(64)));
 
         // In some cases, Rust uses a transparent type here. Convert the pointer to an rvalue
         // of the type expected. https://github.com/model-checking/kani/issues/822
@@ -589,7 +589,7 @@ impl<'tcx> GotocCtx<'tcx> {
         v // t: T
             .address_of() // &t: T*
             .cast_to(Type::unsigned_int(8).to_pointer()) // (u8 *)&t: u8 *
-            .plus(Expr::int_constant(offset, Type::size_t())) // ((u8 *)&t) + offset: u8 *
+            .plus(Expr::int_constant(offset, Type::ssize_t())) // ((u8 *)&t) + offset: isize *
             .cast_to(niche_ty.to_pointer()) // (N *)(((u8 *)&t) + offset): N *
             .dereference() // *(N *)(((u8 *)&t) + offset): N
     }

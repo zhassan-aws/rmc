@@ -4,7 +4,9 @@ use self::BinaryOperand::*;
 use self::ExprValue::*;
 use self::UnaryOperand::*;
 use super::super::MachineModel;
-use super::{DatatypeComponent, Location, Parameter, Stmt, SwitchCase, SymbolTable, Type};
+use super::{
+    CIntType, DatatypeComponent, Location, Parameter, Stmt, SwitchCase, SymbolTable, Type,
+};
 use crate::InternedString;
 use num::bigint::BigInt;
 use std::collections::BTreeMap;
@@ -829,7 +831,7 @@ impl Expr {
             }
             Plus => {
                 (lhs.typ == rhs.typ && (lhs.typ.is_numeric() || lhs.typ.is_vector()))
-                    || (lhs.typ.is_pointer() && rhs.typ.is_integer())
+                    || (lhs.typ.is_pointer() && rhs.typ.is_signed_integer())
             }
             // Arithmetic
             Div | Mod | Mult => lhs.typ == rhs.typ && (lhs.typ.is_numeric() || lhs.typ.is_vector()),
@@ -1254,7 +1256,12 @@ impl Expr {
     pub fn index_ptr(self, idx: Expr) -> Self {
         assert!(idx.typ().is_integer());
         assert!(self.typ().is_pointer());
-        self.plus(idx).dereference()
+        let signed_idx = match idx.clone().typ() {
+            Type::Unsignedbv { width } => idx.cast_to(Type::signed_int(*width)),
+            Type::CInteger(CIntType::SizeT) => idx.cast_to(Type::ssize_t()),
+            _ => idx,
+        };
+        self.plus(signed_idx).dereference()
     }
 
     /// `ArithmeticOverflowResult r; >>>r.overflowed = builtin_sub_overflow(self, e, &r.result)<<<`
