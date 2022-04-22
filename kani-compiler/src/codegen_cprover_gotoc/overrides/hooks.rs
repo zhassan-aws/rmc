@@ -552,8 +552,9 @@ struct RustRealloc;
 
 impl<'tcx> GotocHook<'tcx> for RustRealloc {
     fn hook_applies(&self, tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> bool {
-        let name = tcx.symbol_name(instance).name.to_string();
-        name == "__rust_realloc"
+        let _name = tcx.symbol_name(instance).name.to_string();
+        //name == "__rust_realloc"
+        false
     }
 
     fn handle(

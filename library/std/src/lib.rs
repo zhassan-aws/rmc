@@ -12,6 +12,8 @@
 // re-export all std symbols
 pub use std::*;
 
+// Override alloc calls with stubs.
+pub mod alloc;
 // Override process calls with stubs.
 pub mod process;
 
