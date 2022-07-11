@@ -184,6 +184,9 @@ pub enum BinaryOperator {
     OverflowMinus,
     OverflowMult,
     OverflowPlus,
+    OverflowResultMinus,
+    OverflowResultMult,
+    OverflowResultPlus,
     Plus,
     ROk,
     Rol,
@@ -236,12 +239,45 @@ pub enum UnaryOperator {
 }
 
 /// The return type for `__CPROVER_overflow_op` operations
-pub struct ArithmeticOverflowResult {
-    /// If overflow did not occur, the result of the operation. Otherwise undefined.
-    pub result: Expr,
-    /// Boolean: true if overflow occured, false otherwise.
-    pub overflowed: Expr,
+//pub struct ArithmeticOverflowResult {
+//    /// If overflow did not occur, the result of the operation. Otherwise undefined.
+//    pub result: Expr,
+//    /// Boolean: true if overflow occured, false otherwise.
+//    pub overflowed: Expr,
+//}
+
+pub struct ArithOverflowResult {
+    name: InternedString,
+    tag: Type,
+    components: Vec<DatatypeComponent>,
 }
+
+impl ArithOverflowResult {
+    pub const RESULT_FIELD: &'static str = "result";
+    pub const OVERFLOWED_FIELD: &'static str = "overflowed";
+
+    /// Constructor
+    pub fn new(operand_type: Type) -> ArithOverflowResult {
+        assert!(operand_type.is_integer());
+        let name = format!("overflow_result_{:?}", operand_type).into();
+        ArithOverflowResult { name , tag: Type::struct_tag(name),
+            components: vec![DatatypeComponent::field(ArithOverflowResult::RESULT_FIELD, operand_type), DatatypeComponent::field(ArithOverflowResult::OVERFLOWED_FIELD, Type::bool())]
+        }
+    }
+
+    pub fn name(&self) -> InternedString {
+        self.name
+    }
+
+    pub fn tag(&self) -> &Type {
+        &self.tag
+    }
+
+    pub fn components(&self) -> &Vec<DatatypeComponent> {
+        &self.components
+    }
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// Implementations
@@ -890,11 +926,11 @@ impl Expr {
             // Floating Point Equalities
             IeeeFloatEqual | IeeeFloatNotequal => lhs.typ == rhs.typ && lhs.typ.is_floating_point(),
             // Overflow flags
-            OverflowMinus => {
+            OverflowMinus | OverflowResultMinus => {
                 (lhs.typ == rhs.typ && (lhs.typ.is_pointer() || lhs.typ.is_numeric()))
                     || (lhs.typ.is_pointer() && rhs.typ.is_integer())
             }
-            OverflowMult | OverflowPlus => {
+            OverflowMult | OverflowPlus | OverflowResultMult | OverflowResultPlus => {
                 (lhs.typ == rhs.typ && lhs.typ.is_integer())
                     || (lhs.typ.is_pointer() && rhs.typ.is_integer())
             }
@@ -940,6 +976,9 @@ impl Expr {
             IeeeFloatEqual | IeeeFloatNotequal => Type::bool(),
             // Overflow flags
             OverflowMinus | OverflowMult | OverflowPlus => Type::bool(),
+            OverflowResultMinus | OverflowResultMult | OverflowResultPlus => {
+                ArithOverflowResult::new(lhs.typ.clone()).tag().clone()
+            }
             ROk => Type::bool(),
         }
     }
@@ -1283,10 +1322,8 @@ impl Expr {
     }
 
     /// `ArithmeticOverflowResult r; >>>r.overflowed = builtin_add_overflow(self, e, &r.result)<<<`
-    pub fn add_overflow(self, e: Expr) -> ArithmeticOverflowResult {
-        let result = self.clone().plus(e.clone());
-        let overflowed = self.add_overflow_p(e);
-        ArithmeticOverflowResult { result, overflowed }
+    pub fn add_overflow(self, e: Expr) -> Expr {
+        self.binop(BinaryOperator::OverflowResultPlus, e)
     }
 
     /// `&self[0]`. Converts arrays into pointers
@@ -1314,11 +1351,9 @@ impl Expr {
         self.plus(idx).dereference()
     }
 
-    /// `ArithmeticOverflowResult r; >>>r.overflowed = builtin_sub_overflow(self, e, &r.result)<<<`
-    pub fn mul_overflow(self, e: Expr) -> ArithmeticOverflowResult {
-        let result = self.clone().mul(e.clone());
-        let overflowed = self.mul_overflow_p(e);
-        ArithmeticOverflowResult { result, overflowed }
+    /// `ArithmeticOverflowResult r; >>>r.overflowed = builtin_mul_overflow(self, e, &r.result)<<<`
+    pub fn mul_overflow(self, e: Expr) -> Expr {
+        self.binop(BinaryOperator::OverflowResultMult, e)
     }
 
     /// Reinterpret the bits of `self` as being of type `t`.
@@ -1338,10 +1373,8 @@ impl Expr {
     }
 
     /// `ArithmeticOverflowResult r; >>>r.overflowed = builtin_mul_overflow(self, e, &r.result)<<<`
-    pub fn sub_overflow(self, e: Expr) -> ArithmeticOverflowResult {
-        let result = self.clone().sub(e.clone());
-        let overflowed = self.sub_overflow_p(e);
-        ArithmeticOverflowResult { result, overflowed }
+    pub fn sub_overflow(self, e: Expr) -> Expr {
+        self.binop(BinaryOperator::OverflowResultMinus, e)
     }
 
     /// `__CPROVER_same_object(self, e)`
@@ -1349,28 +1382,20 @@ impl Expr {
         self.pointer_object().eq(e.pointer_object())
     }
 
-    /// addition that saturates at bounds
-    pub fn saturating_add(self, e: Expr, mm: &MachineModel) -> Expr {
-        assert!(self.typ.is_integer());
-        assert_eq!(self.typ, e.typ);
+    /// the saturating value if an add operation overflows
+    pub fn add_saturating_val(self, _e: Expr, mm: &MachineModel) -> Expr {
         let typ = self.typ.clone();
-        let res = self.clone().add_overflow(e);
         // If negative + something overflowed, the something must have been negative too, so we saturate to min.
         // (self < 0) ? min_int : max_int
-        let saturating_val = self.is_negative().ternary(typ.min_int_expr(mm), typ.max_int_expr(mm));
-        res.overflowed.ternary(saturating_val, res.result)
+        self.is_negative().ternary(typ.min_int_expr(mm), typ.max_int_expr(mm))
     }
 
-    /// subtraction that saturates at bounds
-    pub fn saturating_sub(self, e: Expr, mm: &MachineModel) -> Expr {
-        assert!(self.typ.is_integer());
-        assert_eq!(self.typ, e.typ);
+    /// the saturating value if a sub operation overflows
+    pub fn sub_saturating_val(self, e: Expr, mm: &MachineModel) -> Expr {
         let typ = self.typ.clone();
-        let res = self.sub_overflow(e.clone());
         // If something minus a negative overflowed, it must have overflowed past positive max. Saturate there.
         // Otherwise, if something minus a positive overflowed, it must have overflowed to past min. Saturate there.
-        let saturating_val = e.is_negative().ternary(typ.max_int_expr(mm), typ.min_int_expr(mm));
-        res.overflowed.ternary(saturating_val, res.result)
+        e.is_negative().ternary(typ.max_int_expr(mm), typ.min_int_expr(mm))
     }
 
     /// `"s"`

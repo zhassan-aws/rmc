@@ -18,7 +18,7 @@ mod typ;
 
 pub use builtin::BuiltinFn;
 pub use expr::{
-    ArithmeticOverflowResult, BinaryOperator, Expr, ExprValue, SelfOperator, UnaryOperator,
+    ArithOverflowResult, BinaryOperator, Expr, ExprValue, SelfOperator, UnaryOperator,
 };
 pub use location::Location;
 pub use stmt::{Stmt, StmtBody, SwitchCase};

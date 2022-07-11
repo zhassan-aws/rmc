@@ -17,7 +17,7 @@ use super::current_fn::CurrentFnCtx;
 use super::vtable_ctx::VtableCtx;
 use crate::codegen_cprover_gotoc::overrides::{fn_hooks, GotocHooks};
 use crate::codegen_cprover_gotoc::utils::full_crate_name;
-use cbmc::goto_program::{DatatypeComponent, Expr, Location, Stmt, Symbol, SymbolTable, Type};
+use cbmc::goto_program::{ArithOverflowResult, DatatypeComponent, Expr, Location, Stmt, Symbol, SymbolTable, Type};
 use cbmc::utils::aggr_tag;
 use cbmc::InternedString;
 use cbmc::{MachineModel, RoundingMode};
@@ -243,6 +243,14 @@ impl<'tcx> GotocCtx<'tcx> {
             self.symbol_table.replace_with_completion(sym);
         }
         Type::struct_tag(struct_name)
+    }
+
+    pub fn ensure_overflow_result_struct(&mut self, operand_type: Type) -> Type {
+        let overflow_result = ArithOverflowResult::new(operand_type);
+        let tag = self.ensure_struct(overflow_result.name(), overflow_result.name(), |_, _| {
+            *overflow_result.components()
+        });
+        tag
     }
 
     /// Ensures that a union with name `union_name` appears in the symbol table.

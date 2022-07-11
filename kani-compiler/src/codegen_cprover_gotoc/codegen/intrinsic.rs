@@ -4,7 +4,7 @@
 use super::typ::pointee_type;
 use super::PropertyClass;
 use crate::codegen_cprover_gotoc::GotocCtx;
-use cbmc::goto_program::{ArithmeticOverflowResult, BuiltinFn, Expr, Location, Stmt, Type};
+use cbmc::goto_program::{ArithOverflowResult, BuiltinFn, Expr, Location, Stmt, Type};
 use rustc_middle::mir::{BasicBlock, Operand, Place};
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, Ty};
@@ -176,19 +176,40 @@ impl<'tcx> GotocCtx<'tcx> {
         }
 
         // Intrinsics of the form *_with_overflow
+        //macro_rules! codegen_op_with_overflow {
+        //    ($f:ident) => {{
+        //        let pt = self.place_ty(p);
+        //        let t = self.codegen_ty(pt);
+        //        let a = fargs.remove(0);
+        //        let b = fargs.remove(0);
+        //        let res = a.$f(b);
+        //        let e = Expr::struct_expr_from_values(
+        //            t,
+        //            vec![res.result, res.overflowed.cast_to(Type::c_bool())],
+        //            &self.symbol_table,
+        //        );
+        //        self.codegen_expr_to_place(p, e)
+        //    }};
+        //}
+
         macro_rules! codegen_op_with_overflow {
             ($f:ident) => {{
-                let pt = self.place_ty(p);
-                let t = self.codegen_ty(pt);
                 let a = fargs.remove(0);
                 let b = fargs.remove(0);
-                let res = a.$f(b);
-                let e = Expr::struct_expr_from_values(
-                    t,
-                    vec![res.result, res.overflowed.cast_to(Type::c_bool())],
+                let result_type = self.ensure_overflow_result_struct(*a.typ());
+                let result = a.$f(b);
+                assert_eq!(*result.typ(), result_type);
+                let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(result), loc);
+
+                let pt = self.place_ty(p);
+                let t = self.codegen_ty(pt);
+                let cast = Expr::struct_expr_from_values(
+                    t.clone(),
+                    vec![var.clone().member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table), var.member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table).cast_to(Type::c_bool())],
                     &self.symbol_table,
                 );
-                self.codegen_expr_to_place(p, e)
+                let st_expr = Expr::statement_expression(vec![decl, cast.as_stmt(loc)], t);
+                self.codegen_expr_to_place(p, st_expr)
             }};
         }
 
@@ -197,14 +218,24 @@ impl<'tcx> GotocCtx<'tcx> {
             ($f:ident) => {{
                 let a = fargs.remove(0);
                 let b = fargs.remove(0);
-                let res = a.$f(b);
+                let result_type = self.ensure_overflow_result_struct(*a.typ());
+                let result = a.$f(b);
+                assert_eq!(*result.typ(), result_type);
+                let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(result), loc);
+
+                let pt = self.place_ty(p);
+                let t = self.codegen_ty(pt);
+                let overflowed = var.clone().member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table);
+                let op_result = var.member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table);
+
                 let check = self.codegen_assert(
-                    res.overflowed.not(),
+                    overflowed.not(),
                     PropertyClass::ArithmeticOverflow,
                     format!("attempt to compute {} which would overflow", intrinsic).as_str(),
                     loc,
                 );
-                let expr_place = self.codegen_expr_to_place(p, res.result);
+                let st_expr = Expr::statement_expression(vec![decl, op_result.as_stmt(loc)], t);
+                let expr_place = self.codegen_expr_to_place(p, st_expr);
                 Stmt::block(vec![expr_place, check], loc)
             }};
         }
@@ -278,13 +309,23 @@ impl<'tcx> GotocCtx<'tcx> {
             ($f:ident) => {{ self.binop(p, fargs, |a, b| a.$f(b)) }};
         }
 
-        // Intrinsics which encode a simple binary operation which need a machine model
-        macro_rules! codegen_intrinsic_binop_with_mm {
-            ($f:ident) => {{
+        // Intrinsics of the form saturating_*
+        macro_rules! codegen_saturating_op {
+            ($overflow_op:ident, $saturating_val:ident) => {{
                 let arg1 = fargs.remove(0);
                 let arg2 = fargs.remove(0);
-                let e = arg1.$f(arg2, self.symbol_table.machine_model());
-                self.codegen_expr_to_place(p, e)
+                let result_type = self.ensure_overflow_result_struct(*arg1.typ());
+                let e = arg1.clone().$overflow_op(arg2);
+                assert_eq!(*e.typ(), result_type);
+                let saturating_val = arg1.clone().$saturating_val(arg2, self.symbol_table.machine_model());
+                let (var, decl) = self.decl_temp_variable(result_type, Some(e), loc);
+                let overflowed = var.clone().member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table);
+                let op_result = var.member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table);
+                let result = overflowed.ternary(saturating_val, op_result);
+                let pt = self.place_ty(p);
+                let t = self.codegen_ty(pt);
+                let st_expr = Expr::statement_expression(vec![decl, result.as_stmt(loc)], t);
+                self.codegen_expr_to_place(p, st_expr)
             }};
         }
 
@@ -567,8 +608,8 @@ impl<'tcx> GotocCtx<'tcx> {
             "rotate_right" => codegen_intrinsic_binop!(ror),
             "roundf32" => codegen_simple_intrinsic!(Roundf),
             "roundf64" => codegen_simple_intrinsic!(Round),
-            "saturating_add" => codegen_intrinsic_binop_with_mm!(saturating_add),
-            "saturating_sub" => codegen_intrinsic_binop_with_mm!(saturating_sub),
+            "saturating_add" => codegen_saturating_op!(add_overflow, add_saturating_val),
+            "saturating_sub" => codegen_saturating_op!(sub_overflow, sub_saturating_val),
             "sinf32" => codegen_simple_intrinsic!(Sinf),
             "sinf64" => codegen_simple_intrinsic!(Sin),
             "simd_add" => {
@@ -996,9 +1037,9 @@ impl<'tcx> GotocCtx<'tcx> {
         // Check that the computation would not overflow an `isize`
         // These checks may allow a wrapping-around behavior in CBMC:
         // https://github.com/model-checking/kani/issues/1150
-        let dst_ptr_of = src_ptr.clone().cast_to(Type::ssize_t()).add_overflow(offset_bytes);
+        let overflowed = src_ptr.clone().cast_to(Type::ssize_t()).add_overflow_p(offset_bytes);
         let overflow_check = self.codegen_assert(
-            dst_ptr_of.overflowed.not(),
+            overflowed.not(),
             PropertyClass::ArithmeticOverflow,
             "attempt to compute offset which would overflow",
             loc,
@@ -1018,13 +1059,18 @@ impl<'tcx> GotocCtx<'tcx> {
         p: &Place<'tcx>,
         loc: Location,
     ) -> Stmt {
+        let arg_type = fargs[0].typ().clone();
         let (offset_expr, offset_overflow) = self.codegen_ptr_offset_from_expr(fargs);
+
+        let result_type = self.ensure_overflow_result_struct(arg_type);
+        let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(offset_overflow), loc);
+        let overflowed = offset_overflow.member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table);
 
         // Check that computing `offset` in bytes would not overflow an `isize`
         // These checks may allow a wrapping-around behavior in CBMC:
         // https://github.com/model-checking/kani/issues/1150
         let overflow_check = self.codegen_assert(
-            offset_overflow.overflowed.not(),
+            overflowed.not(),
             PropertyClass::ArithmeticOverflow,
             "attempt to compute offset in bytes which would overflow an `isize`",
             loc,
@@ -1045,18 +1091,24 @@ impl<'tcx> GotocCtx<'tcx> {
     ) -> Stmt {
         let (offset_expr, offset_overflow) = self.codegen_ptr_offset_from_expr(fargs);
 
+        let arg = fargs[0];
+        let result_type = self.ensure_overflow_result_struct(*arg.typ());
+        let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(offset_overflow), loc);
+        let result = var.member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table);
+        let overflowed = var.member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table);
+
         // Check that computing `offset` in bytes would not overflow an `isize`
         // These checks may allow a wrapping-around behavior in CBMC:
         // https://github.com/model-checking/kani/issues/1150
         let overflow_check = self.codegen_assert_assume(
-            offset_overflow.overflowed.not(),
+            overflowed.not(),
             PropertyClass::ArithmeticOverflow,
             "attempt to compute offset in bytes which would overflow an `isize`",
             loc,
         );
 
         let non_negative_check = self.codegen_assert_assume(
-            offset_overflow.result.is_non_negative(),
+            result.is_non_negative(),
             PropertyClass::SafetyCheck,
             "attempt to compute unsigned offset with negative distance",
             loc,
@@ -1071,7 +1123,7 @@ impl<'tcx> GotocCtx<'tcx> {
     fn codegen_ptr_offset_from_expr(
         &mut self,
         mut fargs: Vec<Expr>,
-    ) -> (Expr, ArithmeticOverflowResult) {
+    ) -> (Expr, Expr) {
         let dst_ptr = fargs.remove(0);
         let src_ptr = fargs.remove(0);
 
@@ -1434,14 +1486,19 @@ impl<'tcx> GotocCtx<'tcx> {
         let layout = self.layout_of(ty);
         let size_of_elem = Expr::int_constant(layout.size.bytes(), res_ty);
         let size_of_count_elems = count.mul_overflow(size_of_elem);
+        let result_type = self.ensure_overflow_result_struct(*count.typ());
+        let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(size_of_count_elems), loc);
+        let overflowed = var.clone().member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table);
+        let op_result = var.member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table);
         let message =
             format!("{}: attempt to compute number in bytes which would overflow", intrinsic);
         let assert_stmt = self.codegen_assert(
-            size_of_count_elems.overflowed.not(),
+            overflowed.not(),
             PropertyClass::ArithmeticOverflow,
             message.as_str(),
             loc,
         );
-        (size_of_count_elems.result, assert_stmt)
+        let st_expr = Expr::statement_expression(vec![decl, op_result.as_stmt(loc)], res_ty);
+        (st_expr, assert_stmt)
     }
 }

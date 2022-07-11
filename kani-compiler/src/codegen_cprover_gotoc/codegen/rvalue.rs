@@ -5,7 +5,7 @@ use crate::codegen_cprover_gotoc::codegen::PropertyClass;
 use crate::codegen_cprover_gotoc::utils::{dynamic_fat_ptr, slice_fat_ptr};
 use crate::codegen_cprover_gotoc::{GotocCtx, VtableCtx};
 use crate::unwrap_or_return_codegen_unimplemented;
-use cbmc::goto_program::{Expr, Location, Stmt, Symbol, Type};
+use cbmc::goto_program::{ArithOverflowResult, Expr, Location, Stmt, Symbol, Type};
 use cbmc::utils::BUG_REPORT_URL;
 use cbmc::MachineModel;
 use cbmc::{btree_string_map, InternString, InternedString};
@@ -266,6 +266,7 @@ impl<'tcx> GotocCtx<'tcx> {
         e1: &Operand<'tcx>,
         e2: &Operand<'tcx>,
         res_ty: Ty<'tcx>,
+        loc: Location,
     ) -> Expr {
         let ce1 = self.codegen_operand(e1);
         let ce2 = self.codegen_operand(e2);
@@ -295,27 +296,45 @@ impl<'tcx> GotocCtx<'tcx> {
         match op {
             BinOp::Add => {
                 let res = ce1.add_overflow(ce2);
-                Expr::struct_expr_from_values(
-                    self.codegen_ty(res_ty),
-                    vec![res.result, res.overflowed.cast_to(Type::c_bool())],
+                let result_type = self.ensure_overflow_result_struct(*ce1.typ());
+                assert_eq!(*res.typ(), result_type);
+                let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(res), loc);
+
+                let t = self.codegen_ty(res_ty);
+                let cast = Expr::struct_expr_from_values(
+                    t.clone(),
+                    vec![var.clone().member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table), var.member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table).cast_to(Type::c_bool())],
                     &self.symbol_table,
-                )
+                );
+                Expr::statement_expression(vec![decl, cast.as_stmt(loc)], t)
             }
             BinOp::Sub => {
                 let res = ce1.sub_overflow(ce2);
-                Expr::struct_expr_from_values(
-                    self.codegen_ty(res_ty),
-                    vec![res.result, res.overflowed.cast_to(Type::c_bool())],
+                let result_type = self.ensure_overflow_result_struct(*ce1.typ());
+                assert_eq!(*res.typ(), result_type);
+                let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(res), loc);
+
+                let t = self.codegen_ty(res_ty);
+                let cast = Expr::struct_expr_from_values(
+                    t.clone(),
+                    vec![var.clone().member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table), var.member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table).cast_to(Type::c_bool())],
                     &self.symbol_table,
-                )
+                );
+                Expr::statement_expression(vec![decl, cast.as_stmt(loc)], t)
             }
             BinOp::Mul => {
                 let res = ce1.mul_overflow(ce2);
-                Expr::struct_expr_from_values(
-                    self.codegen_ty(res_ty),
-                    vec![res.result, res.overflowed.cast_to(Type::c_bool())],
+                let result_type = self.ensure_overflow_result_struct(*ce1.typ());
+                assert_eq!(*res.typ(), result_type);
+                let (var, decl) = self.decl_temp_variable(result_type.clone(), Some(res), loc);
+
+                let t = self.codegen_ty(res_ty);
+                let cast = Expr::struct_expr_from_values(
+                    t.clone(),
+                    vec![var.clone().member(ArithOverflowResult::RESULT_FIELD, &self.symbol_table), var.member(ArithOverflowResult::OVERFLOWED_FIELD, &self.symbol_table).cast_to(Type::c_bool())],
                     &self.symbol_table,
-                )
+                );
+                Expr::statement_expression(vec![decl, cast.as_stmt(loc)], t)
             }
             BinOp::Shl => {
                 let t1 = self.operand_ty(e1);
@@ -444,7 +463,7 @@ impl<'tcx> GotocCtx<'tcx> {
                 self.codegen_rvalue_binary_op(op, e1, e2, loc)
             }
             Rvalue::CheckedBinaryOp(op, box (ref e1, ref e2)) => {
-                self.codegen_rvalue_checked_binary_op(op, e1, e2, res_ty)
+                self.codegen_rvalue_checked_binary_op(op, e1, e2, res_ty, loc)
             }
             Rvalue::NullaryOp(k, t) => {
                 let t = self.monomorphize(*t);
