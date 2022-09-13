@@ -24,7 +24,9 @@ impl KaniSession {
         let args: Vec<OsString> = self.cbmc_flags(file, harness)?;
 
         // TODO get cbmc path from self
-        let mut cmd = Command::new("cbmc");
+        let mut cmd = Command::new("/usr/bin/time");
+        cmd.arg("--verbose");
+        cmd.arg("cbmc");
         cmd.args(args);
 
         let now = Instant::now();
