@@ -32,6 +32,8 @@ extern crate rustc_target;
 extern crate tempfile;
 
 mod args;
+#[cfg(feature = "boogie")]
+mod codegen_boogie;
 #[cfg(feature = "cprover")]
 mod codegen_cprover_gotoc;
 mod kani_compiler;
