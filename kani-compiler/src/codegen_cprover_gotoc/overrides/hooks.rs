@@ -158,6 +158,39 @@ impl<'tcx> GotocHook<'tcx> for Assert {
     }
 }
 
+struct HashmapRandomKeys;
+
+impl<'tcx> GotocHook<'tcx> for HashmapRandomKeys {
+    fn hook_applies(&self, tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> bool {
+        let name = with_no_trimmed_paths!(tcx.def_path_str(instance.def_id()));
+        name == "std::sys::unix::rand::hashmap_random_keys"
+    }
+
+    fn handle(
+        &self,
+        tcx: &mut GotocCtx<'tcx>,
+        _instance: Instance<'tcx>,
+        fargs: Vec<Expr>,
+        assign_to: Place<'tcx>,
+        target: Option<BasicBlock>,
+        span: Option<Span>,
+    ) -> Stmt {
+        assert!(fargs.is_empty());
+        let loc = tcx.codegen_span_option(span);
+        let target = target.unwrap();
+        let pt = tcx.place_ty(&assign_to);
+        let pe = unwrap_or_return_codegen_unimplemented_stmt!(tcx, tcx.codegen_place(&assign_to))
+            .goto_expr;
+        Stmt::block(
+            vec![
+                pe.assign(tcx.codegen_ty(pt).nondet(), loc),
+                Stmt::goto(tcx.current_fn().find_label(&target), loc),
+            ],
+            loc,
+        )
+    }
+}
+
 struct Nondet;
 
 impl<'tcx> GotocHook<'tcx> for Nondet {
@@ -365,6 +398,7 @@ pub fn fn_hooks<'tcx>() -> GotocHooks<'tcx> {
             Rc::new(Assume),
             Rc::new(Assert),
             Rc::new(Cover),
+            Rc::new(HashmapRandomKeys),
             Rc::new(Nondet),
             Rc::new(RustAlloc),
             Rc::new(SliceFromRawPart),
