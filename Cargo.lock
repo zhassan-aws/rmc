@@ -105,6 +105,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4682ae6287fcf752ecaabbfcc7b6f9b72aa33933dc23a554d853aea8eea8635"
 
 [[package]]
+name = "boogie_ast"
+version = "0.34.0"
+dependencies = [
+ "num-bigint",
+]
+
+[[package]]
 name = "bookrunner"
 version = "0.1.0"
 dependencies = [
@@ -466,6 +473,7 @@ dependencies = [
 name = "kani-compiler"
 version = "0.37.0"
 dependencies = [
+ "boogie_ast",
  "clap",
  "cprover_bindings",
  "home",
