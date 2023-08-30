@@ -4,6 +4,7 @@
 //! to run during code generation. For example, this can be used to hook up
 //! custom MIR transformations.
 
+use crate::kani_middle::extract_unsafe::extract_unsafety;
 use crate::kani_middle::intrinsics::ModelIntrinsics;
 use crate::kani_middle::reachability::{collect_reachable_items, filter_crate_items};
 use crate::kani_middle::stubbing;
@@ -71,6 +72,9 @@ fn run_kani_mir_passes<'tcx>(
     stubbing::transform_foreign_functions(tcx, &mut transformed_body);
     // This should be applied after stubbing so user stubs take precedence.
     ModelIntrinsics::run_pass(tcx, &mut transformed_body);
+    if let Some(local_def_id) = def_id.as_local() {
+        extract_unsafety(tcx, local_def_id, &transformed_body);
+    }
     tcx.arena.alloc(transformed_body)
 }
 

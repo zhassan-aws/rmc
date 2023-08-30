@@ -30,6 +30,7 @@ use self::attributes::KaniAttributes;
 pub mod analysis;
 pub mod attributes;
 pub mod coercion;
+pub mod extract_unsafe;
 mod intrinsics;
 pub mod metadata;
 pub mod provide;
