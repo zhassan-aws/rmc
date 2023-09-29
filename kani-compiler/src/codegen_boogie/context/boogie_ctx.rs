@@ -9,7 +9,7 @@ use rustc_middle::mir::interpret::{ConstValue, Scalar};
 use rustc_middle::mir::traversal::reverse_postorder;
 use rustc_middle::mir::{
     BasicBlock, BasicBlockData, BinOp, Constant, ConstantKind, HasLocalDecls, Local, LocalDecls,
-    Operand, Place, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+    Operand, Place, ProjectionElem, Rvalue, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind,
 };
 use rustc_middle::span_bug;
 use rustc_middle::ty::layout::{
@@ -91,7 +91,15 @@ impl<'tcx> BoogieCtx<'tcx> {
         trace!(typ=?ty, "codegen_type");
         match ty.kind() {
             ty::Bool => Type::Bool,
-            ty::Int(_ity) => Type::Int, // TODO: use Bv
+            ty::Int(_ity) => Type::Int,  // TODO: use Bv
+            ty::Uint(_ity) => Type::Int, // TODO:
+            ty::Array(elem_type, _len) => {
+                Type::Array { element_type: Box::new(self.codegen_type(*elem_type)), len: 0 }
+            }
+            ty::Tuple(types) => {
+                // Only handles first element of tuple for now
+                self.codegen_type(types.iter().next().unwrap())
+            }
             _ => todo!(),
         }
     }
@@ -111,35 +119,48 @@ impl<'tcx> BoogieCtx<'tcx> {
         bbd: &BasicBlockData<'tcx>,
     ) -> Stmt {
         debug!(?bb, ?bbd, "codegen_block");
-        // the first statement should be labelled. if there is no statements, then the
+        let label = format!("{bb:?}");
+        // the first statement should be labelled. if there are no statements, then the
         // terminator should be labelled.
         let statements = match bbd.statements.len() {
             0 => {
-                let term = bbd.terminator();
-                let tcode = self.codegen_terminator(local_decls, term);
-                vec![tcode]
+                let tcode = self.codegen_terminator(local_decls, bbd.terminator());
+                vec![Stmt::Label { label, statement: Box::new(tcode) } ]
             }
             _ => {
                 let mut statements: Vec<Stmt> =
-                    bbd.statements.iter().map(|stmt| self.codegen_statement(stmt)).collect();
+                    bbd.statements.iter().enumerate().map(|(index, stmt)| {
+                        let s = self.codegen_statement(stmt);
+                        if index == 0 {
+                            Stmt::Label { label: label.clone(), statement: Box::new(s) }
+                        } else {
+                            s
+                        }
+                    }
+                    ).collect();
 
                 let term = self.codegen_terminator(local_decls, bbd.terminator());
                 statements.push(term);
                 statements
             }
         };
-        Stmt::Block { statements }
+        Stmt::block(statements)
     }
 
     fn codegen_statement(&self, stmt: &Statement<'tcx>) -> Stmt {
         match &stmt.kind {
             StatementKind::Assign(box (place, rvalue)) => {
                 debug!(?place, ?rvalue, "codegen_statement");
-                let rv = self.codegen_rvalue(rvalue);
-                // assignment statement
-                let asgn = Stmt::Assignment { target: format!("{:?}", place.local), value: rv.1 };
-                // add it to other statements generated while creating the rvalue (if any)
-                add_statement(rv.0, asgn)
+                let place_name = format!("{:?}", place.local);
+                if place_name.starts_with("nd__") || matches!(rvalue, Rvalue::Repeat(..)) {
+                    Stmt::Havoc { name: place_name }
+                } else {
+                    let rv = self.codegen_rvalue(rvalue);
+                    // assignment statement
+                    let asgn = Stmt::Assignment { target: place_name, value: rv.1 };
+                    // add it to other statements generated while creating the rvalue (if any)
+                    add_statement(rv.0, asgn)
+                }
             }
             StatementKind::FakeRead(..)
             | StatementKind::SetDiscriminant { .. }
@@ -163,6 +184,10 @@ impl<'tcx> BoogieCtx<'tcx> {
         match rvalue {
             Rvalue::Use(operand) => (None, self.codegen_operand(operand)),
             Rvalue::BinaryOp(binop, box (lhs, rhs)) => self.codegen_binary_op(binop, lhs, rhs),
+            Rvalue::CheckedBinaryOp(binop, box (ref e1, ref e2)) => {
+                // TODO: handle overflow check
+                self.codegen_binary_op(binop, e1, e2)
+            }
             _ => todo!(),
         }
     }
@@ -173,11 +198,24 @@ impl<'tcx> BoogieCtx<'tcx> {
         lhs: &Operand<'tcx>,
         rhs: &Operand<'tcx>,
     ) -> (Option<Stmt>, Expr) {
+        debug!(binop=?binop, "codegen_binary_op");
+        let left = Box::new(self.codegen_operand(lhs));
+        let right = Box::new(self.codegen_operand(rhs));
         let expr = match binop {
             BinOp::Eq => Expr::BinaryOp {
                 op: BinaryOp::Eq,
-                left: Box::new(self.codegen_operand(lhs)),
-                right: Box::new(self.codegen_operand(rhs)),
+                left,
+                right,
+            },
+            BinOp::AddUnchecked | BinOp::Add => Expr::BinaryOp {
+                op: BinaryOp::Add,
+                left,
+                right,
+            },
+            BinOp::Lt => Expr::BinaryOp {
+                op: BinaryOp::Lt,
+                left,
+                right,
             },
             _ => todo!(),
         };
@@ -197,6 +235,9 @@ impl<'tcx> BoogieCtx<'tcx> {
                 term.source_info.span,
             ),
             TerminatorKind::Return => Stmt::Return,
+            TerminatorKind::Goto { target } => Stmt::Goto { label: format!("{target:?}") },
+            TerminatorKind::SwitchInt { discr, targets } => self.codegen_switch_int(discr, targets),
+            TerminatorKind::Assert { .. } => Stmt::Block { statements: vec![] }, // do nothing for now
             _ => todo!(),
         }
     }
@@ -235,6 +276,25 @@ impl<'tcx> BoogieCtx<'tcx> {
         }
     }
 
+    fn codegen_switch_int(&self, discr: &Operand<'tcx>, targets: &SwitchTargets) -> Stmt {
+        debug!(discr=?discr, targets=?targets, "codegen_switch_int");
+        let op = self.codegen_operand(discr);
+        if targets.all_targets().len() == 2 {
+            let then = targets.iter().next().unwrap();
+            // model as an if
+            return Stmt::If {
+                condition: Expr::BinaryOp {
+                    op: BinaryOp::Eq,
+                    left: Box::new(op),
+                    right: Box::new(Expr::Literal(Literal::Int(then.0.into()))),
+                },
+                body: Box::new(Stmt::Goto { label: format!("{:?}", then.1) }),
+                else_body: Some(Box::new(Stmt::Goto { label: format!("{:?}", targets.otherwise()) })),
+            };
+        }
+        todo!()
+    }
+
     fn codegen_funcall_args(
         &self,
         local_decls: &LocalDecls<'tcx>,
@@ -267,11 +327,23 @@ impl<'tcx> BoogieCtx<'tcx> {
         }
     }
 
-    fn codegen_place(&self, place: &Place<'tcx>) -> Expr {
+    pub fn codegen_place(&self, place: &Place<'tcx>) -> Expr {
         debug!(place=?place, "codegen_place");
         debug!(place.local=?place.local, "codegen_place");
         debug!(place.projection=?place.projection, "codegen_place");
-        self.codegen_local(place.local)
+        let local = self.codegen_local(place.local);
+        place.projection.iter().fold(local, |place, proj| {
+            match proj {
+                ProjectionElem::Index(i) => {
+                    let index = self.codegen_local(i);
+                    Expr::Index { base: Box::new(place), index: Box::new(index) }
+                }
+                _ => {
+                    // TODO: handle
+                    place
+                }
+            }
+        })
     }
 
     fn codegen_local(&self, local: Local) -> Expr {

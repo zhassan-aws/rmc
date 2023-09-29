@@ -24,14 +24,18 @@ pub enum KaniIntrinsic {
 
     /// Kani assume statement (`kani::assume`)
     KaniAssume,
+
+    /// Kani symbolic variable (`kani::any`)
+    KaniAnyRaw,
 }
 
 impl<'tcx> BoogieCtx<'tcx> {
     /// If provided function is a Kani intrinsic (e.g. assert, assume, cover), returns it
     // TODO: move this function up to `kani_middle` along with the enum
     pub fn kani_intrinsic(&self, instance: Instance<'tcx>) -> Option<KaniIntrinsic> {
-        let intrinsics = KaniIntrinsic::VARIANTS;
-        for intrinsic in intrinsics {
+        debug!(?instance.def);
+        for intrinsic in KaniIntrinsic::VARIANTS {
+            println!("{intrinsic:?}");
             let attr_sym = rustc_span::symbol::Symbol::intern(intrinsic);
             if let Some(attr_id) = self.tcx.all_diagnostic_items(()).name_to_id.get(&attr_sym) {
                 if instance.def.def_id() == *attr_id {
@@ -58,6 +62,9 @@ impl<'tcx> BoogieCtx<'tcx> {
             }
             KaniIntrinsic::KaniAssume => {
                 self.codegen_kani_assume(instance, fargs, assign_to, target, span)
+            }
+            KaniIntrinsic::KaniAnyRaw => {
+                self.codegen_kani_any_raw(instance, fargs, assign_to, target, span)
             }
         }
     }
@@ -100,6 +107,32 @@ impl<'tcx> BoogieCtx<'tcx> {
             statements: vec![
                 Stmt::Assume { condition: cond },
                 // TODO: handle target
+            ],
+        }
+    }
+
+    pub fn codegen_kani_any_raw(
+        &self,
+        _instance: Instance<'tcx>,
+        fargs: Vec<Expr>,
+        assign_to: Place<'tcx>,
+        target: Option<BasicBlock>,
+        _span: Option<Span>,
+    ) -> Stmt {
+        assert!(fargs.is_empty());
+
+        let place = self.codegen_place(&assign_to);
+
+        let symbol = if let Expr::Symbol { name } = place {
+            name
+        } else {
+            panic!("expecting place to be a symbol and not {place:?}.")
+        };
+
+        Stmt::Block {
+            statements: vec![
+                Stmt::Havoc { name: symbol },
+                Stmt::Goto { label: format!("{:?}", target.unwrap()) }
             ],
         }
     }

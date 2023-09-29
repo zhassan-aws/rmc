@@ -222,7 +222,7 @@ pub(crate) unsafe fn any_raw_internal<T, const SIZE_T: usize>() -> T {
 #[rustc_diagnostic_item = "KaniAnyRaw"]
 #[inline(never)]
 #[allow(dead_code)]
-fn any_raw_inner<T>() -> T {
+pub fn any_raw_inner<T>() -> T {
     // while we could use `unreachable!()` or `panic!()` as the body of this
     // function, both cause Kani to produce a warning on any program that uses
     // kani::any() (see https://github.com/model-checking/kani/issues/2010).
