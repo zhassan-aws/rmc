@@ -4,11 +4,11 @@
 use std::io::Write;
 
 use crate::kani_queries::QueryDb;
-use boogie_ast::boogie_program::{BinaryOp, BoogieProgram, Expr, Literal, Procedure, Stmt, Type};
+use boogie_ast::boogie_program::{BinaryOp, BoogieProgram, Expr, Function, Literal, Parameter, Procedure, Stmt, Type};
 use rustc_middle::mir::interpret::{ConstValue, Scalar};
 use rustc_middle::mir::traversal::reverse_postorder;
 use rustc_middle::mir::{
-    BasicBlock, BasicBlockData, BinOp, Constant, ConstantKind, HasLocalDecls, Local, LocalDecls,
+    BasicBlock, BasicBlockData, BinOp, Body, Constant, ConstantKind, HasLocalDecls, Local,
     Operand, Place, ProjectionElem, Rvalue, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind,
 };
 use rustc_middle::span_bug;
@@ -21,7 +21,25 @@ use rustc_target::abi::{HasDataLayout, TargetDataLayout};
 use strum::VariantNames;
 use tracing::{debug, debug_span, trace};
 
-use super::kani_intrinsic::KaniIntrinsic;
+use super::kani_intrinsic::{get_kani_intrinsic, KaniIntrinsic};
+
+fn unsigned_less_than(width: usize) -> Function {
+    Function::new(format!("$UnsignedLessThanBv{width}"),
+                  vec![Parameter::new("lhs".into(), Type::Bv(width)),
+                       Parameter::new("rhs".into(), Type::Bv(width))],
+                  Type::Bool,
+                None,
+            vec![String::from(":bvbuiltin \"bvult\"")])
+}
+
+fn unsigned_add(width: usize) -> Function {
+    Function::new(format!("$UnsignedAddBv{width}"),
+                  vec![Parameter::new("lhs".into(), Type::Bv(width)),
+                       Parameter::new("rhs".into(), Type::Bv(width))],
+                  Type::Bv(width),
+                None,
+            vec![String::from(":bvbuiltin \"bvadd\"")])
+}
 
 /// A context that provides the main methods for translating MIR constructs to
 /// Boogie and stores what has been codegen so far
@@ -37,26 +55,40 @@ pub struct BoogieCtx<'tcx> {
     pub intrinsics: Vec<String>,
 }
 
+/// A context for translating a function that holds the information needed
 impl<'tcx> BoogieCtx<'tcx> {
-    pub fn new(tcx: TyCtxt<'tcx>, queries: QueryDb) -> BoogieCtx<'tcx> {
+    pub fn new(tcx: TyCtxt<'tcx>, queries: QueryDb) -> BoogieCtx {
+        let mut program = BoogieProgram::new();
+
+        // TODO: The current functions in the preamble should be added lazily instead
+        Self::add_preamble(&mut program);
+
         BoogieCtx {
             tcx,
             queries,
-            program: BoogieProgram::new(),
+            program,
             intrinsics: KaniIntrinsic::VARIANTS.iter().map(|s| (*s).into()).collect(),
         }
+
+    }
+
+    fn add_preamble(program: &mut BoogieProgram) {
+        program.add_function(unsigned_less_than(64));
+        program.add_function(unsigned_add(64));
     }
 
     /// Codegen a function into a Boogie procedure.
     /// Returns `None` if the function is a hook.
-    pub fn codegen_function(&self, instance: Instance<'tcx>) -> Option<Procedure> {
+    pub fn codegen_function<'a>(&'a self, instance: Instance<'tcx>) -> Option<Procedure> {
         debug!(?instance, "boogie_codegen_function");
-        if self.kani_intrinsic(instance).is_some() {
+        if get_kani_intrinsic(self.tcx, instance).is_some() {
             debug!("skipping kani intrinsic `{instance}`");
             return None;
         }
-        let mut decl = self.codegen_declare_variables(instance);
-        let body = self.codegen_body(instance);
+        let mir = self.tcx.instance_mir(instance.def);
+        let fcx = FunctionCtx::new(self, instance, mir);
+        let mut decl = fcx.codegen_declare_variables();
+        let body = fcx.codegen_body();
         decl.push(body);
         Some(Procedure::new(
             self.tcx.symbol_name(instance).name.to_string(),
@@ -67,9 +99,30 @@ impl<'tcx> BoogieCtx<'tcx> {
         ))
     }
 
-    fn codegen_declare_variables(&self, instance: Instance<'tcx>) -> Vec<Stmt> {
-        let mir = self.tcx.instance_mir(instance.def);
-        let ldecls = mir.local_decls();
+    pub fn add_procedure(&mut self, procedure: Procedure) {
+        self.program.add_procedure(procedure);
+    }
+
+    /// Write the program to the given writer
+    pub fn write<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        self.program.write_to(writer)?;
+        Ok(())
+    }
+}
+
+pub struct FunctionCtx<'a, 'tcx> {
+    bcx: &'a BoogieCtx<'tcx>,
+    instance: Instance<'tcx>,
+    mir: &'a Body<'tcx>,
+}
+
+impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
+    pub fn new(bcx: &'a BoogieCtx<'tcx>, instance: Instance<'tcx>, mir: &'a Body<'tcx>) -> FunctionCtx<'a, 'tcx> {
+        Self { bcx, instance, mir }
+    }
+
+    pub fn codegen_declare_variables(&self) -> Vec<Stmt> {
+        let ldecls = self.mir.local_decls();
         let decls: Vec<Stmt> = ldecls
             .indices()
             .enumerate()
@@ -91,8 +144,8 @@ impl<'tcx> BoogieCtx<'tcx> {
         trace!(typ=?ty, "codegen_type");
         match ty.kind() {
             ty::Bool => Type::Bool,
-            ty::Int(_ity) => Type::Int,  // TODO: use Bv
-            ty::Uint(_ity) => Type::Int, // TODO:
+            ty::Int(ity) => Type::Bv(ity.bit_width().unwrap_or(64).try_into().unwrap()),
+            ty::Uint(uty) => Type::Bv(uty.bit_width().unwrap_or(64).try_into().unwrap()),
             ty::Array(elem_type, _len) => {
                 Type::Array { element_type: Box::new(self.codegen_type(*elem_type)), len: 0 }
             }
@@ -104,17 +157,16 @@ impl<'tcx> BoogieCtx<'tcx> {
         }
     }
 
-    fn codegen_body(&self, instance: Instance<'tcx>) -> Stmt {
-        let mir = self.tcx.instance_mir(instance.def);
+    fn codegen_body(&self) -> Stmt {
+        let mir = self.mir;
         let statements: Vec<Stmt> = reverse_postorder(mir)
-            .map(|(bb, bbd)| self.codegen_block(mir.local_decls(), bb, bbd))
+            .map(|(bb, bbd)| self.codegen_block(bb, bbd))
             .collect();
         Stmt::Block { statements }
     }
 
     fn codegen_block(
         &self,
-        local_decls: &LocalDecls<'tcx>,
         bb: BasicBlock,
         bbd: &BasicBlockData<'tcx>,
     ) -> Stmt {
@@ -124,7 +176,7 @@ impl<'tcx> BoogieCtx<'tcx> {
         // terminator should be labelled.
         let statements = match bbd.statements.len() {
             0 => {
-                let tcode = self.codegen_terminator(local_decls, bbd.terminator());
+                let tcode = self.codegen_terminator(bbd.terminator());
                 vec![Stmt::Label { label, statement: Box::new(tcode) } ]
             }
             _ => {
@@ -139,7 +191,7 @@ impl<'tcx> BoogieCtx<'tcx> {
                     }
                     ).collect();
 
-                let term = self.codegen_terminator(local_decls, bbd.terminator());
+                let term = self.codegen_terminator(bbd.terminator());
                 statements.push(term);
                 statements
             }
@@ -207,27 +259,39 @@ impl<'tcx> BoogieCtx<'tcx> {
                 left,
                 right,
             },
-            BinOp::AddUnchecked | BinOp::Add => Expr::BinaryOp {
-                op: BinaryOp::Add,
-                left,
-                right,
+            BinOp::AddUnchecked | BinOp::Add => {
+                let left_type = self.operand_ty(lhs);
+                if self.operand_ty(rhs) != left_type {
+                    todo!("Addition of different types is not yet supported");
+                } else {
+                    let bv_func = match left_type.kind() {
+                        ty::Int(it) => format!("$SignedAddBv{}", it.bit_width().unwrap_or(64)),
+                        ty::Uint(it) => format!("$UnsignedAddBv{}", it.bit_width().unwrap_or(64)),
+                        _ => todo!(),
+                    };
+                    Expr::function_call(bv_func, vec![*left, *right])
+                }
             },
-            BinOp::Lt => Expr::BinaryOp {
-                op: BinaryOp::Lt,
-                left,
-                right,
-            },
+            BinOp::Lt => {
+                let left_type = self.operand_ty(lhs);
+                assert_eq!(left_type, self.operand_ty(rhs));
+                let bv_func = match left_type.kind() {
+                    ty::Int(it) => format!("$SignedLessThanBv{}", it.bit_width().unwrap_or(64)),
+                    ty::Uint(it) => format!("$UnsignedLessThanBv{}", it.bit_width().unwrap_or(64)),
+                    _ => todo!(),
+                };
+                Expr::function_call(bv_func, vec![*left, *right])
+            }
             _ => todo!(),
         };
         (None, expr)
     }
 
-    fn codegen_terminator(&self, local_decls: &LocalDecls<'tcx>, term: &Terminator<'tcx>) -> Stmt {
+    fn codegen_terminator(&self, term: &Terminator<'tcx>) -> Stmt {
         let _trace_span = debug_span!("CodegenTerminator", statement = ?term.kind).entered();
         debug!("handling terminator {:?}", term);
         match &term.kind {
             TerminatorKind::Call { func, args, destination, target, .. } => self.codegen_funcall(
-                local_decls,
                 func,
                 args,
                 destination,
@@ -244,7 +308,6 @@ impl<'tcx> BoogieCtx<'tcx> {
 
     fn codegen_funcall(
         &self,
-        local_decls: &LocalDecls<'tcx>,
         func: &Operand<'tcx>,
         args: &[Operand<'tcx>],
         destination: &Place<'tcx>,
@@ -252,15 +315,15 @@ impl<'tcx> BoogieCtx<'tcx> {
         span: Span,
     ) -> Stmt {
         debug!(?func, ?args, ?destination, ?span, "codegen_funcall");
-        let fargs = self.codegen_funcall_args(local_decls, args);
-        let funct = self.operand_ty(local_decls, func);
+        let fargs = self.codegen_funcall_args(args);
+        let funct = self.operand_ty(func);
         // TODO: Only Kani intrinsics are handled currently
         match &funct.kind() {
             ty::FnDef(defid, substs) => {
                 let instance =
-                    Instance::expect_resolve(self.tcx, ty::ParamEnv::reveal_all(), *defid, substs);
+                    Instance::expect_resolve(self.bcx.tcx, ty::ParamEnv::reveal_all(), *defid, substs);
 
-                if let Some(intrinsic) = self.kani_intrinsic(instance) {
+                if let Some(intrinsic) = get_kani_intrinsic(self.bcx.tcx, instance) {
                     return self.codegen_kani_intrinsic(
                         intrinsic,
                         instance,
@@ -281,12 +344,17 @@ impl<'tcx> BoogieCtx<'tcx> {
         let op = self.codegen_operand(discr);
         if targets.all_targets().len() == 2 {
             let then = targets.iter().next().unwrap();
+            let right = match self.operand_ty(discr).kind() {
+                ty::Bool => Literal::Bool(then.0 != 0),
+                ty::Uint(_) => Literal::bv(128, then.0.into()),
+                _ => unreachable!(),
+            };
             // model as an if
             return Stmt::If {
                 condition: Expr::BinaryOp {
                     op: BinaryOp::Eq,
                     left: Box::new(op),
-                    right: Box::new(Expr::Literal(Literal::Int(then.0.into()))),
+                    right: Box::new(Expr::Literal(right)),
                 },
                 body: Box::new(Stmt::Goto { label: format!("{:?}", then.1) }),
                 else_body: Some(Box::new(Stmt::Goto { label: format!("{:?}", targets.otherwise()) })),
@@ -297,13 +365,12 @@ impl<'tcx> BoogieCtx<'tcx> {
 
     fn codegen_funcall_args(
         &self,
-        local_decls: &LocalDecls<'tcx>,
         args: &[Operand<'tcx>],
     ) -> Vec<Expr> {
         debug!(?args, "codegen_funcall_args");
         args.iter()
             .filter_map(|o| {
-                let ty = self.operand_ty(local_decls, o);
+                let ty = self.operand_ty(o);
                 // TODO: handle non-primitive types
                 if ty.is_primitive() {
                     return Some(self.codegen_operand(o));
@@ -369,6 +436,7 @@ impl<'tcx> BoogieCtx<'tcx> {
     }
 
     fn codegen_scalar(&self, s: Scalar, ty: Ty<'tcx>) -> Expr {
+        debug!(kind=?ty.kind(), "codegen_scalar");
         match (s, ty.kind()) {
             (Scalar::Int(_), ty::Bool) => Expr::Literal(Literal::Bool(s.to_bool().unwrap())),
             (Scalar::Int(_), ty::Int(it)) => match it {
@@ -378,36 +446,32 @@ impl<'tcx> BoogieCtx<'tcx> {
                 IntTy::I64 => Expr::Literal(Literal::Int(s.to_i64().unwrap().into())),
                 IntTy::I128 => Expr::Literal(Literal::Int(s.to_i128().unwrap().into())),
                 IntTy::Isize => {
+                    // TODO: get target width
                     Expr::Literal(Literal::Int(s.to_target_isize(self).unwrap().into()))
                 }
             },
             (Scalar::Int(_), ty::Uint(it)) => match it {
-                UintTy::U8 => Expr::Literal(Literal::Int(s.to_u8().unwrap().into())),
-                UintTy::U16 => Expr::Literal(Literal::Int(s.to_u16().unwrap().into())),
-                UintTy::U32 => Expr::Literal(Literal::Int(s.to_u32().unwrap().into())),
-                UintTy::U64 => Expr::Literal(Literal::Int(s.to_u64().unwrap().into())),
-                UintTy::U128 => Expr::Literal(Literal::Int(s.to_u128().unwrap().into())),
+                UintTy::U8 => Expr::Literal(Literal::bv(8, s.to_u8().unwrap().into())),
+                UintTy::U16 => Expr::Literal(Literal::bv(16, s.to_u16().unwrap().into())),
+                UintTy::U32 => Expr::Literal(Literal::bv(32, s.to_u32().unwrap().into())),
+                UintTy::U64 => Expr::Literal(Literal::bv(64, s.to_u64().unwrap().into())),
+                UintTy::U128 => Expr::Literal(Literal::bv(128, s.to_u128().unwrap().into())),
                 UintTy::Usize => {
-                    Expr::Literal(Literal::Int(s.to_target_isize(self).unwrap().into()))
+                    // TODO: get target width
+                    Expr::Literal(Literal::bv(64, s.to_target_usize(self).unwrap().into()))
                 }
             },
             _ => todo!(),
         }
     }
 
-    /// Write the program to the given writer
-    pub fn write<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
-        self.program.write_to(writer)?;
-        Ok(())
-    }
-
-    fn operand_ty(&self, local_decls: &LocalDecls<'tcx>, o: &Operand<'tcx>) -> Ty<'tcx> {
+    fn operand_ty(&self, o: &Operand<'tcx>) -> Ty<'tcx> {
         // TODO: monomorphize
-        o.ty(local_decls, self.tcx)
+        o.ty(self.mir.local_decls(), self.bcx.tcx)
     }
 }
 
-impl<'tcx> LayoutOfHelpers<'tcx> for BoogieCtx<'tcx> {
+impl<'a, 'tcx> LayoutOfHelpers<'tcx> for FunctionCtx<'a, 'tcx> {
     type LayoutOfResult = TyAndLayout<'tcx>;
 
     fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
@@ -415,27 +479,21 @@ impl<'tcx> LayoutOfHelpers<'tcx> for BoogieCtx<'tcx> {
     }
 }
 
-impl<'tcx> HasParamEnv<'tcx> for BoogieCtx<'tcx> {
+impl<'a, 'tcx> HasParamEnv<'tcx> for FunctionCtx<'a, 'tcx> {
     fn param_env(&self) -> ty::ParamEnv<'tcx> {
         ty::ParamEnv::reveal_all()
     }
 }
 
-impl<'tcx> HasTyCtxt<'tcx> for BoogieCtx<'tcx> {
+impl<'a, 'tcx> HasTyCtxt<'tcx> for FunctionCtx<'a, 'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
-        self.tcx
+        self.bcx.tcx
     }
 }
 
-impl<'tcx> HasDataLayout for BoogieCtx<'tcx> {
+impl<'a, 'tcx> HasDataLayout for FunctionCtx<'a, 'tcx> {
     fn data_layout(&self) -> &TargetDataLayout {
-        self.tcx.data_layout()
-    }
-}
-
-impl<'tcx> BoogieCtx<'tcx> {
-    pub fn add_procedure(&mut self, procedure: Procedure) {
-        self.program.add_procedure(procedure);
+        self.bcx.tcx.data_layout()
     }
 }
 

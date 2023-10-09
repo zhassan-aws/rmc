@@ -118,8 +118,8 @@ impl BoogieProgram {
         }
         if !self.functions.is_empty() {
             writeln!(writer, "// Functions:")?;
-            for _f in &self.functions {
-                todo!()
+            for f in &self.functions {
+                f.write_to(&mut writer)?;
             }
         }
         if !self.procedures.is_empty() {
@@ -132,21 +132,54 @@ impl BoogieProgram {
     }
 }
 
+impl Function {
+    fn write_to<T: Write>(&self, writer: &mut Writer<T>) -> std::io::Result<()> {
+        // signature
+        write!(writer, "function ")?;
+        // attributes
+        for attr in &self.attributes {
+            write!(writer, "{{{attr}}} ")?;
+        }
+        write!(writer, "{}(", self.name)?;
+        for (i, param) in self.parameters.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ", ")?;
+            }
+            write!(writer, "{}: ", param.name)?;
+            param.typ.write_to(writer)?;
+        }
+        write!(writer, ") returns (")?;
+        self.return_type.write_to(writer)?;
+        write!(writer, ")")?;
+        if let Some(body) = &self.body {
+            writeln!(writer, "{{")?;
+            writer.increase_indent();
+            body.write_to(writer)?;
+            writer.decrease_indent();
+            writeln!(writer, "}}")?;
+        } else {
+            writeln!(writer, ";")?;
+        }
+        writer.newline()?;
+        Ok(())
+    }
+}
+
 impl Procedure {
     fn write_to<T: Write>(&self, writer: &mut Writer<T>) -> std::io::Result<()> {
         // signature
         write!(writer, "procedure {}(", self.name)?;
         for (i, param) in self.parameters.iter().enumerate() {
             if i > 0 {
-                write!(writer, ",")?;
+                write!(writer, ", ")?;
             }
             write!(writer, "{}: ", param.name)?;
             param.typ.write_to(writer)?;
         }
         write!(writer, ") ")?;
-        if !self.return_type.is_empty() {
+        if !self.return_parameters.is_empty() {
             write!(writer, "returns (")?;
-            for (i, (name, typ)) in self.return_type.iter().enumerate() {
+            for (i, (name, typ)) in self.return_parameters.iter().enumerate() {
                 if i > 0 {
                     write!(writer, ",")?;
                 }
@@ -194,6 +227,16 @@ impl Expr {
                 op.write_to(writer)?;
                 write!(writer, " ")?;
                 right.write_to(writer)?;
+                write!(writer, ")")?;
+            }
+            Expr::FunctionCall { symbol, arguments } => {
+                write!(writer, "{symbol}(")?;
+                for (i, a) in arguments.iter().enumerate() {
+                    if i > 0 {
+                        write!(writer, ", ")?;
+                    }
+                    a.write_to(writer)?;
+                }
                 write!(writer, ")")?;
             }
             Expr::Index { base, index } => {
@@ -346,7 +389,7 @@ impl Type {
                 value.write_to(writer)?;
             }
             Type::Array { element_type, .. } => {
-                write!(writer, "[int]")?;
+                write!(writer, "[bv64]")?;
                 element_type.write_to(writer)?;
             }
         }
@@ -417,7 +460,7 @@ mod tests {
             procedures: vec![Procedure {
                 name: "main".to_string(),
                 parameters: Vec::new(),
-                return_type: vec![("z".to_string(), Type::Bool)],
+                return_parameters: vec![("z".to_string(), Type::Bool)],
                 contract: Some(Contract {
                     requires: Vec::new(),
                     ensures: vec![Expr::BinaryOp {

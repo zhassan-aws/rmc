@@ -37,6 +37,12 @@ pub struct Parameter {
     typ: Type,
 }
 
+impl Parameter {
+    pub fn new(name: String, typ: Type) -> Self {
+        Self { name, typ }
+    }
+}
+
 /// Literal types
 #[derive(Debug, PartialEq, Eq)]
 pub enum Literal {
@@ -48,6 +54,12 @@ pub enum Literal {
 
     /// Unbounded integer values, e.g. `1000` or `-456789`
     Int(BigInt),
+}
+
+impl Literal {
+    pub fn bv(width: usize, value: BigUint) -> Self {
+        Self::Bv { width, value }
+    }
 }
 
 /// Unary operators
@@ -117,8 +129,17 @@ pub enum Expr {
     /// Binary operation
     BinaryOp { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
 
+    /// Function call
+    FunctionCall { symbol: String, arguments: Vec<Expr> },
+
     /// Index operation
     Index { base: Box<Expr>, index: Box<Expr> },
+}
+
+impl Expr {
+    pub fn function_call(symbol: String, arguments: Vec<Expr>) -> Self {
+        Expr::FunctionCall { symbol, arguments }
+    }
 }
 
 /// Statement types
@@ -191,7 +212,7 @@ pub struct Contract {
 pub struct Procedure {
     name: String,
     parameters: Vec<Parameter>,
-    return_type: Vec<(String, Type)>,
+    return_parameters: Vec<(String, Type)>,
     contract: Option<Contract>,
     body: Stmt,
 }
@@ -200,18 +221,36 @@ impl Procedure {
     pub fn new(
         name: String,
         parameters: Vec<Parameter>,
-        return_type: Vec<(String, Type)>,
+        return_parameters: Vec<(String, Type)>,
         contract: Option<Contract>,
         body: Stmt,
     ) -> Self {
-        Procedure { name, parameters, return_type, contract, body }
+        Procedure { name, parameters, return_parameters, contract, body }
     }
 }
 
 /// Function definition
 /// A function in Boogie is a mathematical function (deterministic, has no side
 /// effects, and whose body is an expression)
-struct Function {}
+pub struct Function {
+    name: String,
+    parameters: Vec<Parameter>,
+    return_type: Type,
+    body: Option<Expr>,
+    attributes: Vec<String>,
+}
+
+impl Function {
+    pub fn new(
+        name: String,
+        parameters: Vec<Parameter>,
+        return_type: Type,
+        body: Option<Expr>,
+        attributes: Vec<String>,
+    ) -> Self {
+        Function { name, parameters, return_type, body, attributes }
+    }
+}
 
 /// A boogie program
 pub struct BoogieProgram {
@@ -237,5 +276,9 @@ impl BoogieProgram {
 
     pub fn add_procedure(&mut self, procedure: Procedure) {
         self.procedures.push(procedure);
+    }
+
+    pub fn add_function(&mut self, function: Function) {
+        self.functions.push(function);
     }
 }
