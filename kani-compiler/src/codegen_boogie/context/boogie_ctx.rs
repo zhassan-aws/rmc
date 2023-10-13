@@ -7,6 +7,8 @@ use crate::kani_queries::QueryDb;
 use boogie_ast::boogie_program::{
     BinaryOp, BoogieProgram, Expr, Function, Literal, Parameter, Procedure, Stmt, Type,
 };
+use itertools::Itertools;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::traversal::reverse_postorder;
 use rustc_middle::mir::{
@@ -96,7 +98,7 @@ impl<'tcx> BoogieCtx<'tcx> {
             return None;
         }
         let mir = self.tcx.instance_mir(instance.def);
-        let fcx = FunctionCtx::new(self, instance, mir);
+        let mut fcx = FunctionCtx::new(self, instance, mir);
         let mut decl = fcx.codegen_declare_variables();
         let body = fcx.codegen_body();
         decl.push(body);
@@ -124,6 +126,7 @@ pub struct FunctionCtx<'a, 'tcx> {
     bcx: &'a BoogieCtx<'tcx>,
     instance: Instance<'tcx>,
     mir: &'a Body<'tcx>,
+    pub(crate) ref_to_expr: FxHashMap<Place<'tcx>, Expr>,
 }
 
 impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
@@ -132,7 +135,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         instance: Instance<'tcx>,
         mir: &'a Body<'tcx>,
     ) -> FunctionCtx<'a, 'tcx> {
-        Self { bcx, instance, mir }
+        Self { bcx, instance, mir, ref_to_expr: FxHashMap::default() }
     }
 
     pub fn codegen_declare_variables(&self) -> Vec<Stmt> {
@@ -142,11 +145,16 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
             .enumerate()
             .filter_map(|(_idx, lc)| {
                 let typ = ldecls[lc].ty;
+                debug!(?lc, ?typ, "codegen_declare_variables");
+                let typ = self.instance.instantiate_mir_and_normalize_erasing_regions(self.tcx(), ty::ParamEnv::reveal_all(), ty::EarlyBinder::bind(typ));
                 if self.layout_of(typ).is_zst() {
                     return None;
                 }
-                debug!(?lc, ?typ, "codegen_declare_variables");
                 let name = format!("{lc:?}");
+                // skip references for now (e.g. `&self`)
+                if let ty::Ref(..) = typ.kind() {
+                    return None;
+                }
                 let boogie_type = self.codegen_type(typ);
                 Some(Stmt::Decl { name, typ: boogie_type })
             })
@@ -155,7 +163,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     }
 
     fn codegen_type(&self, ty: Ty<'tcx>) -> Type {
-        trace!(typ=?ty, "codegen_type");
+        debug!(typ=?ty, kind=?ty.kind(), "codegen_type");
         match ty.kind() {
             ty::Bool => Type::Bool,
             ty::Int(ity) => Type::Bv(ity.bit_width().unwrap_or(64).try_into().unwrap()),
@@ -167,18 +175,39 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                 // Only handles first element of tuple for now
                 self.codegen_type(types.iter().next().unwrap())
             }
+            ty::Adt(def, args) => {
+                let name = format!("{def:?}");
+                if name == "kani::array::Array" {
+                    let fields = def.all_fields();
+                    //let mut field_types: Vec<Type> = fields.filter_map(|f| {
+                    //    let typ = f.ty(self.tcx(), args);
+                    //    self.layout_of(typ).is_zst().then(|| self.codegen_type(typ))
+                    //}).collect();
+                    //assert_eq!(field_types.len(), 1);
+                    //let typ = field_types.pop().unwrap();
+                    let phantom_data_field = fields.filter(|f| self.layout_of(f.ty(self.tcx(), args)).is_zst()).exactly_one().unwrap_or_else(|_| panic!());
+                    let phantom_data_type = phantom_data_field.ty(self.tcx(), args);
+                    assert!(phantom_data_type.is_phantom_data());
+                    let field_type = args.types().exactly_one().unwrap_or_else(|_| panic!());
+                    println!("{field_type:?}");
+                    let typ = self.codegen_type(field_type);
+                    Type::UnboundedArray { element_type: Box::new(typ), len: 0 }
+                } else {
+                    todo!()
+                }
+            }
             _ => todo!(),
         }
     }
 
-    fn codegen_body(&self) -> Stmt {
+    fn codegen_body(&mut self) -> Stmt {
         let mir = self.mir;
         let statements: Vec<Stmt> =
             reverse_postorder(mir).map(|(bb, bbd)| self.codegen_block(bb, bbd)).collect();
         Stmt::Block { statements }
     }
 
-    fn codegen_block(&self, bb: BasicBlock, bbd: &BasicBlockData<'tcx>) -> Stmt {
+    fn codegen_block(&mut self, bb: BasicBlock, bbd: &BasicBlockData<'tcx>) -> Stmt {
         debug!(?bb, ?bbd, "codegen_block");
         let label = format!("{bb:?}");
         // the first statement should be labelled. if there are no statements, then the
@@ -193,12 +222,12 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     .statements
                     .iter()
                     .enumerate()
-                    .map(|(index, stmt)| {
+                    .filter_map(|(index, stmt)| {
                         let s = self.codegen_statement(stmt);
                         if index == 0 {
-                            Stmt::Label { label: label.clone(), statement: Box::new(s) }
+                            Some(Stmt::Label { label: label.clone(), statement: Box::new(s) })
                         } else {
-                            s
+                            Some(s)
                         }
                     })
                     .collect();
@@ -211,13 +240,15 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         Stmt::block(statements)
     }
 
-    fn codegen_statement(&self, stmt: &Statement<'tcx>) -> Stmt {
+    fn codegen_statement(&mut self, stmt: &Statement<'tcx>) -> Stmt {
         match &stmt.kind {
             StatementKind::Assign(box (place, rvalue)) => {
                 debug!(?place, ?rvalue, "codegen_statement");
                 let place_name = format!("{:?}", place.local);
-                if place_name.starts_with("nd__") || matches!(rvalue, Rvalue::Repeat(..)) {
-                    Stmt::Havoc { name: place_name }
+                if let Rvalue::Ref(_, _, rhs) = rvalue {
+                    let expr = self.codegen_place(rhs);
+                    self.ref_to_expr.insert(*place, expr);
+                    Stmt::Null
                 } else {
                     let rv = self.codegen_rvalue(rvalue);
                     // assignment statement
@@ -252,6 +283,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                 // TODO: handle overflow check
                 self.codegen_binary_op(binop, e1, e2)
             }
+            Rvalue::Ref(_, _, p) => (None, self.codegen_place(p)),
             _ => todo!(),
         }
     }
@@ -319,7 +351,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         span: Span,
     ) -> Stmt {
         debug!(?func, ?args, ?destination, ?span, "codegen_funcall");
-        let fargs = self.codegen_funcall_args(args);
+        //let fargs = self.codegen_funcall_args(args);
         let funct = self.operand_ty(func);
         // TODO: Only Kani intrinsics are handled currently
         match &funct.kind() {
@@ -335,7 +367,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     return self.codegen_kani_intrinsic(
                         intrinsic,
                         instance,
-                        fargs,
+                        args,
                         *destination,
                         *target,
                         Some(span),
@@ -373,23 +405,22 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         todo!()
     }
 
-    fn codegen_funcall_args(&self, args: &[Operand<'tcx>]) -> Vec<Expr> {
-        debug!(?args, "codegen_funcall_args");
-        args.iter()
-            .filter_map(|o| {
-                let ty = self.operand_ty(o);
-                // TODO: handle non-primitive types
-                if ty.is_primitive() {
-                    return Some(self.codegen_operand(o));
-                }
-                // TODO: ignore non-primitive arguments for now (e.g. `msg`
-                // argument of `kani::assert`)
-                None
-            })
-            .collect()
-    }
+    //fn codegen_funcall_args(&self, args: &[Operand<'tcx>]) -> Vec<Expr> {
+    //    debug!(?args, "codegen_funcall_args");
+    //    args.iter()
+    //        .filter_map(|o| {
+    //            let ty = self.operand_ty(o);
+    //            if ty.is_primitive() {
+    //                return Some(self.codegen_operand(o));
+    //            }
+    //            // TODO: ignore non-primitive arguments for now (e.g. `msg`
+    //            // argument of `kani::assert`)
+    //            None
+    //        })
+    //        .collect()
+    //}
 
-    fn codegen_operand(&self, o: &Operand<'tcx>) -> Expr {
+    pub fn codegen_operand(&self, o: &Operand<'tcx>) -> Expr {
         trace!(operand=?o, "codegen_operand");
         // A MIR operand is either a constant (literal or `const` declaration)
         // or a place (being moved or copied for this operation).
@@ -405,12 +436,29 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         debug!(place=?place, "codegen_place");
         debug!(place.local=?place.local, "codegen_place");
         debug!(place.projection=?place.projection, "codegen_place");
+        if let Some(expr) = self.ref_to_expr.get(place) {
+            return expr.clone();
+        }
+        let local_ty = self.mir.local_decls()[place.local].ty;
         let local = self.codegen_local(place.local);
         place.projection.iter().fold(local, |place, proj| {
             match proj {
                 ProjectionElem::Index(i) => {
                     let index = self.codegen_local(i);
                     Expr::Index { base: Box::new(place), index: Box::new(index) }
+                }
+                ProjectionElem::Field(f, t) => {
+                    debug!(ty=?local_ty, "codegen_place_fold");
+                    match local_ty.kind() {
+                        ty::Adt(def, args) => {
+                            let field_name = def.non_enum_variant().fields[f].name.to_string();
+                            Expr::Field { base: Box::new(place), field: field_name }
+                        }
+                        ty::Tuple(types) => {
+                            place
+                        }
+                        _ => todo!()
+                    }
                 }
                 _ => {
                     // TODO: handle

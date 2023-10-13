@@ -6,7 +6,7 @@
 //! library and are annotated with a `rustc_diagnostic_item`.
 
 use boogie_ast::boogie_program::{Expr, Stmt};
-use rustc_middle::mir::{BasicBlock, Place};
+use rustc_middle::mir::{BasicBlock, Operand, Place};
 use rustc_middle::ty::{Instance, TyCtxt};
 use rustc_span::Span;
 use std::str::FromStr;
@@ -27,6 +27,13 @@ pub enum KaniIntrinsic {
 
     /// Kani symbolic variable (`kani::any`)
     KaniAnyRaw,
+
+    /// Kani unbounded array (`kani::array::any`)
+    KaniAnyArray,
+
+    KaniAnyArraySet,
+
+    KaniAnyArrayGet,
 }
 
 /// If provided function is a Kani intrinsic (e.g. assert, assume, cover),
@@ -54,20 +61,30 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         &self,
         intrinsic: KaniIntrinsic,
         instance: Instance<'tcx>,
-        fargs: Vec<Expr>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         target: Option<BasicBlock>,
         span: Option<Span>,
     ) -> Stmt {
         match intrinsic {
             KaniIntrinsic::KaniAssert => {
-                self.codegen_kani_assert(instance, fargs, assign_to, target, span)
+                self.codegen_kani_assert(instance, args, assign_to, target, span)
             }
             KaniIntrinsic::KaniAssume => {
-                self.codegen_kani_assume(instance, fargs, assign_to, target, span)
+                self.codegen_kani_assume(instance, args, assign_to, target, span)
             }
             KaniIntrinsic::KaniAnyRaw => {
-                self.codegen_kani_any_raw(instance, fargs, assign_to, target, span)
+                self.codegen_kani_any_raw(instance, args, assign_to, target, span)
+            }
+            KaniIntrinsic::KaniAnyArray => {
+                self.codegen_kani_any_array(instance, args, assign_to, target, span)
+            }
+            KaniIntrinsic::KaniAnyArraySet => {
+                self.codegen_kani_any_array_set(instance, args, assign_to, target, span)
+            }
+            KaniIntrinsic::KaniAnyArrayGet => {
+                self.codegen_kani_any_array_get(instance, args, assign_to, target, span)
             }
         }
     }
@@ -75,14 +92,14 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_assert(
         &self,
         _instance: Instance<'tcx>,
-        mut fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
         _assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
         _span: Option<Span>,
     ) -> Stmt {
-        // TODO: ignoring the `'static str` argument for now
-        assert_eq!(fargs.len(), 1); // 2);
-        let cond = fargs.remove(0);
+        assert_eq!(args.len(), 2);
+        // TODO: ignore the `'static str` argument for now
+        let cond = self.codegen_operand(&args[0]);
         // TODO: handle message
         // TODO: handle location
 
@@ -97,13 +114,14 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_assume(
         &self,
         _instance: Instance<'tcx>,
-        mut fargs: Vec<Expr>,
+        //mut fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
         _assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
         _span: Option<Span>,
     ) -> Stmt {
-        assert_eq!(fargs.len(), 1);
-        let cond = fargs.remove(0);
+        assert_eq!(args.len(), 1);
+        let cond = self.codegen_operand(&args[0]);
         // TODO: handle location
 
         Stmt::Block {
@@ -117,12 +135,13 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_raw(
         &self,
         _instance: Instance<'tcx>,
-        fargs: Vec<Expr>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         target: Option<BasicBlock>,
         _span: Option<Span>,
     ) -> Stmt {
-        assert!(fargs.is_empty());
+        assert!(args.is_empty());
 
         let place = self.codegen_place(&assign_to);
 
@@ -139,4 +158,91 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
             ],
         }
     }
+
+    pub fn codegen_kani_any_array(
+        &self,
+        instance: Instance<'tcx>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
+        assign_to: Place<'tcx>,
+        target: Option<BasicBlock>,
+        span: Option<Span>,
+    ) -> Stmt {
+        assert!(args.is_empty());
+
+        self.codegen_kani_any_raw(instance, args, assign_to, target, span)
+    }
+
+    pub fn codegen_kani_any_array_set (
+        &self,
+        _instance: Instance<'tcx>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
+        assign_to: Place<'tcx>,
+        _target: Option<BasicBlock>,
+        _span: Option<Span>,
+    ) -> Stmt {
+        assert_eq!(args.len(), 3);
+        debug!(?args, "codegen_kani_any_array_set");
+        debug!(?args, "codegen_kani_any_array_get");
+
+        let mut_self_ref = &args[0];
+        let Operand::Move(place) = mut_self_ref else {
+            panic!("expecting first argument to be `Operand::Move`.");
+        };
+        let Some(expr) = self.ref_to_expr.get(place) else {
+            panic!("expecting first argument to be a reference to an array.");
+        };
+        let map = Expr::Field { base: Box::new(expr.clone()), field: String::from("data") };
+
+        let index = self.codegen_operand(&args[1]);
+
+        // TODO: change `Stmt::Assignment` to be in terms of a symbol not a
+        // string to avoid the hacky code below
+        let index_expr = Expr::Index { base: Box::new(map), index: Box::new(index) };
+        //let Expr::Symbol { name } = expr else { panic!("expecting expression to be a symbol") };
+        //let Expr::Literal(literal) = index else { panic!("expecting index to be a literal") };
+        //let Literal::
+        //let index_oper = format!("{name}[{index}]");"
+        let mut buf = Vec::new();
+        let mut writer = boogie_ast::boogie_program::writer::Writer::new(&mut buf);
+        index_expr.write_to(&mut writer).unwrap();
+        let index_str = String::from_utf8(buf).unwrap();
+        let value = self.codegen_operand(&args[2]);
+
+        Stmt::Assignment { target: index_str, value }
+    }
+
+    pub fn codegen_kani_any_array_get (
+        &self,
+        _instance: Instance<'tcx>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
+        assign_to: Place<'tcx>,
+        _target: Option<BasicBlock>,
+        _span: Option<Span>,
+    ) -> Stmt {
+        assert_eq!(args.len(), 2);
+        debug!(?args, "codegen_kani_any_array_get");
+        debug!(?self.ref_to_expr);
+
+        let self_ref = &args[0];
+        let Operand::Move(place) = self_ref else {
+            panic!("expecting first argument to be `Operand::Move`.");
+        };
+        let Some(expr) = self.ref_to_expr.get(place) else {
+            panic!("expecting first argument to be a reference to an array.");
+        };
+        let map = Expr::Field { base: Box::new(expr.clone()), field: String::from("data") };
+
+        let index = self.codegen_operand(&args[1]);
+        let index_expr = Expr::Index { base: Box::new(map), index: Box::new(index) };
+
+        let place = self.codegen_place(&assign_to);
+
+        let Expr::Symbol { name } = place else { panic!("expecting place to be a symbol") }; 
+
+        Stmt::Assignment { target: name, value: index_expr }
+    }
+
 }

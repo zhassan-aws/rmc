@@ -51,13 +51,13 @@ use crate::boogie_program::*;
 use std::io::Write;
 
 /// A writer for Boogie programs.
-struct Writer<'a, T: Write> {
+pub struct Writer<'a, T: Write> {
     writer: &'a mut T,
     indentation: usize,
 }
 
 impl<'a, T: Write> Writer<'a, T> {
-    fn new(writer: &'a mut T) -> Self {
+    pub fn new(writer: &'a mut T) -> Self {
         Self { writer, indentation: 0 }
     }
 
@@ -206,7 +206,7 @@ impl Procedure {
 }
 
 impl Expr {
-    fn write_to<T: Write>(&self, writer: &mut Writer<T>) -> std::io::Result<()> {
+    pub fn write_to<T: Write>(&self, writer: &mut Writer<T>) -> std::io::Result<()> {
         match self {
             Expr::Literal(value) => {
                 value.write_to(writer)?;
@@ -240,11 +240,14 @@ impl Expr {
                 write!(writer, ")")?;
             }
             Expr::Index { base, index } => {
-                write!(writer, "(")?;
                 base.write_to(writer)?;
-                write!(writer, ")[(")?;
+                write!(writer, "[(")?;
                 index.write_to(writer)?;
                 write!(writer, ")]")?;
+            }
+            Expr::Field { base, field } => {
+                base.write_to(writer)?;
+                write!(writer, "->{field}")?;
             }
         }
         Ok(())
@@ -333,6 +336,7 @@ impl Stmt {
                 statement.write_to(writer)?;
                 writer.decrease_indent();
             }
+            Stmt::Null => {}
             Stmt::Return => {
                 writer.indent()?;
                 writeln!(writer, "return;")?;
@@ -390,6 +394,10 @@ impl Type {
             }
             Type::Array { element_type, .. } => {
                 write!(writer, "[bv64]")?;
+                element_type.write_to(writer)?;
+            }
+            Type::UnboundedArray { element_type, len } => {
+                write!(writer, "UnboundedArray ")?;
                 element_type.write_to(writer)?;
             }
         }

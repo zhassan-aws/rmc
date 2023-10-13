@@ -4,7 +4,7 @@
 //! A module that defines the AST of a Boogie program and provides methods for
 //! creating nodes of the AST.
 
-mod writer;
+pub mod writer;
 
 use num_bigint::{BigInt, BigUint};
 
@@ -29,6 +29,9 @@ pub enum Type {
 
     /// Array type
     Array { element_type: Box<Type>, len: usize },
+
+    /// Unbounded array type
+    UnboundedArray { element_type: Box<Type>, len: usize },
 }
 
 /// Function and procedure parameters
@@ -44,7 +47,7 @@ impl Parameter {
 }
 
 /// Literal types
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Literal {
     /// Boolean values: `true`/`false`
     Bool(bool),
@@ -63,7 +66,7 @@ impl Literal {
 }
 
 /// Unary operators
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnaryOp {
     /// Logical negation
     Not,
@@ -72,7 +75,7 @@ pub enum UnaryOp {
     Neg,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BinaryOp {
     /// Logical AND
     And,
@@ -115,7 +118,7 @@ pub enum BinaryOp {
 }
 
 /// Expr types
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
     /// Literal (constant)
     Literal(Literal),
@@ -134,6 +137,9 @@ pub enum Expr {
 
     /// Index operation
     Index { base: Box<Expr>, index: Box<Expr> },
+
+    /// Field operator for datatypes
+    Field { base: Box<Expr>, field: String },
 }
 
 impl Expr {
@@ -178,6 +184,9 @@ pub enum Stmt {
     /// Label statement: `label:`
     Label { label: String, statement: Box<Stmt> },
 
+    /// `;`
+    Null,
+
     /// Return statement: `return;`
     Return,
 
@@ -192,6 +201,10 @@ impl Stmt {
             return statements.remove(0);
         }
         Stmt::Block { statements }
+    }
+
+    pub fn decl(name: String, typ: Type) -> Stmt {
+        Stmt::Decl { name, typ }
     }
 }
 
