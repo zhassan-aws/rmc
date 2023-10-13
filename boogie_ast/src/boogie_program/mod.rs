@@ -26,6 +26,9 @@ pub enum Type {
 
     /// Map type, e.g. `[int]bool`
     Map { key: Box<Type>, value: Box<Type> },
+
+    /// Array type
+    Array { element_type: Box<Type>, len: usize },
 }
 
 /// Function and procedure parameters
@@ -35,6 +38,7 @@ pub struct Parameter {
 }
 
 /// Literal types
+#[derive(Debug, PartialEq, Eq)]
 pub enum Literal {
     /// Boolean values: `true`/`false`
     Bool(bool),
@@ -47,6 +51,7 @@ pub enum Literal {
 }
 
 /// Unary operators
+#[derive(Debug, PartialEq, Eq)]
 pub enum UnaryOp {
     /// Logical negation
     Not,
@@ -55,6 +60,7 @@ pub enum UnaryOp {
     Neg,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum BinaryOp {
     /// Logical AND
     And,
@@ -97,6 +103,7 @@ pub enum BinaryOp {
 }
 
 /// Expr types
+#[derive(Debug, PartialEq, Eq)]
 pub enum Expr {
     /// Literal (constant)
     Literal(Literal),
@@ -109,6 +116,9 @@ pub enum Expr {
 
     /// Binary operation
     BinaryOp { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
+
+    /// Index operation
+    Index { base: Box<Expr>, index: Box<Expr> },
 }
 
 /// Statement types
@@ -135,6 +145,9 @@ pub enum Stmt {
     /// Declaration statement: `var name: type;`
     Decl { name: String, typ: Type },
 
+    /// Havoc statement: `havoc x;`
+    Havoc { name: String },
+
     /// If statement: `if (condition) { body } else { else_body }`
     If { condition: Expr, body: Box<Stmt>, else_body: Option<Box<Stmt>> },
 
@@ -142,13 +155,23 @@ pub enum Stmt {
     Goto { label: String },
 
     /// Label statement: `label:`
-    Label { label: String },
+    Label { label: String, statement: Box<Stmt> },
 
     /// Return statement: `return;`
     Return,
 
     /// While statement: `while (condition) { body }`
     While { condition: Expr, body: Box<Stmt> },
+}
+
+impl Stmt {
+    pub fn block(mut statements: Vec<Stmt>) -> Stmt {
+        // avoid creating a block if there is a single statement
+        if statements.len() == 1 {
+            return statements.remove(0);
+        }
+        Stmt::Block { statements }
+    }
 }
 
 /// Contract specification

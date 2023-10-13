@@ -196,6 +196,13 @@ impl Expr {
                 right.write_to(writer)?;
                 write!(writer, ")")?;
             }
+            Expr::Index { base, index } => {
+                write!(writer, "(")?;
+                base.write_to(writer)?;
+                write!(writer, ")[(")?;
+                index.write_to(writer)?;
+                write!(writer, ")]")?;
+            }
         }
         Ok(())
     }
@@ -248,6 +255,10 @@ impl Stmt {
                 typ.write_to(writer)?;
                 writeln!(writer, ";")?;
             }
+            Stmt::Havoc { name } => {
+                writer.indent()?;
+                writeln!(writer, "havoc {}; ", name)?;
+            }
             Stmt::If { condition, body, else_body } => {
                 writer.indent()?;
                 write!(writer, "if (")?;
@@ -272,9 +283,12 @@ impl Stmt {
                 writer.indent()?;
                 writeln!(writer, "goto {label};")?;
             }
-            Stmt::Label { label } => {
+            Stmt::Label { label, statement } => {
                 writer.indent()?;
                 writeln!(writer, "{label}:")?;
+                writer.increase_indent();
+                statement.write_to(writer)?;
+                writer.decrease_indent();
             }
             Stmt::Return => {
                 writer.indent()?;
@@ -330,6 +344,10 @@ impl Type {
                 key.write_to(writer)?;
                 write!(writer, "]")?;
                 value.write_to(writer)?;
+            }
+            Type::Array { element_type, .. } => {
+                write!(writer, "[int]")?;
+                element_type.write_to(writer)?;
             }
         }
         Ok(())
