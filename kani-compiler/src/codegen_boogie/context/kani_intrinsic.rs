@@ -20,20 +20,26 @@ use super::boogie_ctx::FunctionCtx;
 #[derive(Debug, Clone, PartialEq, Eq, EnumString, EnumVariantNames)]
 pub enum KaniIntrinsic {
     /// Kani assert statement (`kani::assert`)
-    KaniAssert,
+    Assert,
 
     /// Kani assume statement (`kani::assume`)
-    KaniAssume,
+    Assume,
 
     /// Kani symbolic variable (`kani::any`)
-    KaniAnyRaw,
+    AnyRaw,
 
     /// Kani unbounded array (`kani::array::any`)
-    KaniAnyArray,
+    AnyArray,
 
-    KaniAnyArraySet,
+    AnyArraySet,
 
-    KaniAnyArrayGet,
+    AnyArrayGet,
+
+    AnyArrayLen,
+
+    AnyArrayIndex,
+
+    AnyArrayIndexMut,
 }
 
 /// If provided function is a Kani intrinsic (e.g. assert, assume, cover),
@@ -58,7 +64,7 @@ pub fn get_kani_intrinsic<'tcx>(
 
 impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_intrinsic(
-        &self,
+        &mut self,
         intrinsic: KaniIntrinsic,
         instance: Instance<'tcx>,
         //fargs: Vec<Expr>,
@@ -68,23 +74,32 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         span: Option<Span>,
     ) -> Stmt {
         match intrinsic {
-            KaniIntrinsic::KaniAssert => {
+            KaniIntrinsic::Assert => {
                 self.codegen_kani_assert(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::KaniAssume => {
+            KaniIntrinsic::Assume => {
                 self.codegen_kani_assume(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::KaniAnyRaw => {
+            KaniIntrinsic::AnyRaw => {
                 self.codegen_kani_any_raw(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::KaniAnyArray => {
+            KaniIntrinsic::AnyArray => {
                 self.codegen_kani_any_array(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::KaniAnyArraySet => {
+            KaniIntrinsic::AnyArraySet => {
                 self.codegen_kani_any_array_set(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::KaniAnyArrayGet => {
+            KaniIntrinsic::AnyArrayGet => {
                 self.codegen_kani_any_array_get(instance, args, assign_to, target, span)
+            }
+            KaniIntrinsic::AnyArrayLen => {
+                self.codegen_kani_any_array_len(instance, args, assign_to, target, span)
+            }
+            KaniIntrinsic::AnyArrayIndex => {
+                self.codegen_kani_any_array_index(instance, args, assign_to, target, span)
+            }
+            KaniIntrinsic::AnyArrayIndexMut => {
+                self.codegen_kani_any_array_index_mut(instance, args, assign_to, target, span)
             }
         }
     }
@@ -173,18 +188,17 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         self.codegen_kani_any_raw(instance, args, assign_to, target, span)
     }
 
-    pub fn codegen_kani_any_array_set (
+    pub fn codegen_kani_any_array_set(
         &self,
         _instance: Instance<'tcx>,
         //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
-        assign_to: Place<'tcx>,
+        _assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
         _span: Option<Span>,
     ) -> Stmt {
         assert_eq!(args.len(), 3);
         debug!(?args, "codegen_kani_any_array_set");
-        debug!(?args, "codegen_kani_any_array_get");
 
         let mut_self_ref = &args[0];
         let Operand::Move(place) = mut_self_ref else {
@@ -213,7 +227,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         Stmt::Assignment { target: index_str, value }
     }
 
-    pub fn codegen_kani_any_array_get (
+    pub fn codegen_kani_any_array_get(
         &self,
         _instance: Instance<'tcx>,
         //fargs: Vec<Expr>,
@@ -240,9 +254,80 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
 
         let place = self.codegen_place(&assign_to);
 
-        let Expr::Symbol { name } = place else { panic!("expecting place to be a symbol") }; 
+        let Expr::Symbol { name } = place else { panic!("expecting place to be a symbol") };
 
         Stmt::Assignment { target: name, value: index_expr }
     }
 
+    pub fn codegen_kani_any_array_len(
+        &self,
+        _instance: Instance<'tcx>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
+        assign_to: Place<'tcx>,
+        _target: Option<BasicBlock>,
+        _span: Option<Span>,
+    ) -> Stmt {
+        assert_eq!(args.len(), 1);
+        debug!(?args, "codegen_kani_any_array_len");
+        debug!(?self.ref_to_expr);
+
+        let self_ref = &args[0];
+        let expr = self
+            .operand_to_expr(self_ref)
+            .expect("expecting operand to be a ref to an existing expression");
+        let len = Expr::Field { base: Box::new(expr.clone()), field: String::from("len") };
+
+        let place = self.codegen_place(&assign_to);
+
+        let Expr::Symbol { name } = place else { panic!("expecting place to be a symbol") };
+
+        Stmt::Assignment { target: name, value: len }
+    }
+
+    pub fn codegen_kani_any_array_index(
+        &self,
+        instance: Instance<'tcx>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
+        assign_to: Place<'tcx>,
+        target: Option<BasicBlock>,
+        span: Option<Span>,
+    ) -> Stmt {
+        self.codegen_kani_any_array_get(instance, args, assign_to, target, span)
+    }
+
+    pub fn codegen_kani_any_array_index_mut(
+        &mut self,
+        _instance: Instance<'tcx>,
+        //fargs: Vec<Expr>,
+        args: &[Operand<'tcx>],
+        assign_to: Place<'tcx>,
+        _target: Option<BasicBlock>,
+        _span: Option<Span>,
+    ) -> Stmt {
+        assert_eq!(args.len(), 2);
+        debug!(?args, "codegen_kani_any_array_index_mut");
+
+        let mut_self_ref = &args[0];
+        let expr = self
+            .operand_to_expr(mut_self_ref)
+            .expect("expecting operand to be a ref to an existing expression");
+        let map = Expr::Field { base: Box::new(expr.clone()), field: String::from("data") };
+
+        let index = self.codegen_operand(&args[1]);
+
+        // TODO: change `Stmt::Assignment` to be in terms of a symbol not a
+        // string to avoid the hacky code below
+        let index_expr = Expr::Index { base: Box::new(map), index: Box::new(index) };
+        self.ref_to_expr.insert(assign_to, index_expr);
+        Stmt::Null
+    }
+
+    fn operand_to_expr(&self, operand: &Operand<'tcx>) -> Option<&Expr> {
+        let Operand::Move(place) = operand else {
+            return None;
+        };
+        self.ref_to_expr.get(place)
+    }
 }

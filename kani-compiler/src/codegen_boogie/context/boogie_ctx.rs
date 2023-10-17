@@ -5,22 +5,23 @@ use std::io::Write;
 
 use crate::kani_queries::QueryDb;
 use boogie_ast::boogie_program::{
-    BinaryOp, BoogieProgram, Expr, Function, Literal, Parameter, Procedure, Stmt, Type,
+    BinaryOp, BoogieProgram, DataTypeConstructor, DataTypeDeclaration, Expr, Function, Literal,
+    Parameter, Procedure, Stmt, Type, UnaryOp,
 };
 use itertools::Itertools;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::traversal::reverse_postorder;
 use rustc_middle::mir::{
-    BasicBlock, BasicBlockData, BinOp, Body, Const as mirConst, ConstOperand, ConstValue,
+    BasicBlock, BasicBlockData, BinOp, Body, CastKind, Const as mirConst, ConstOperand, ConstValue,
     HasLocalDecls, Local, Operand, Place, ProjectionElem, Rvalue, Statement, StatementKind,
-    SwitchTargets, Terminator, TerminatorKind,
+    SwitchTargets, Terminator, TerminatorKind, UnOp,
 };
 use rustc_middle::span_bug;
 use rustc_middle::ty::layout::{
     HasParamEnv, HasTyCtxt, LayoutError, LayoutOf, LayoutOfHelpers, TyAndLayout,
 };
-use rustc_middle::ty::{self, Instance, IntTy, Ty, TyCtxt, UintTy};
+use rustc_middle::ty::{self, Instance, IntTy, List, Ty, TyCtxt, UintTy};
 use rustc_span::Span;
 use rustc_target::abi::{HasDataLayout, TargetDataLayout};
 use strum::VariantNames;
@@ -87,6 +88,22 @@ impl<'tcx> BoogieCtx<'tcx> {
     fn add_preamble(program: &mut BoogieProgram) {
         program.add_function(unsigned_less_than(64));
         program.add_function(unsigned_add(64));
+
+        // Add unbounded array
+        let name = String::from("$UnboundedArray");
+        let constructor = DataTypeConstructor::new(
+            name.clone(),
+            vec![
+                Parameter::new(
+                    String::from("data"),
+                    Type::map(Type::Bv(64), Type::parameter(String::from("T"))),
+                ),
+                Parameter::new(String::from("len"), Type::Bv(64)),
+            ],
+        );
+        let unbounded_array_data_type =
+            DataTypeDeclaration::new(name.clone(), vec![String::from("T")], vec![constructor]);
+        program.add_datatype(unbounded_array_data_type);
     }
 
     /// Codegen a function into a Boogie procedure.
@@ -146,14 +163,20 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
             .filter_map(|(_idx, lc)| {
                 let typ = ldecls[lc].ty;
                 debug!(?lc, ?typ, "codegen_declare_variables");
-                let typ = self.instance.instantiate_mir_and_normalize_erasing_regions(self.tcx(), ty::ParamEnv::reveal_all(), ty::EarlyBinder::bind(typ));
+                let typ = self.instance.instantiate_mir_and_normalize_erasing_regions(
+                    self.tcx(),
+                    ty::ParamEnv::reveal_all(),
+                    ty::EarlyBinder::bind(typ),
+                );
                 if self.layout_of(typ).is_zst() {
                     return None;
                 }
                 let name = format!("{lc:?}");
-                // skip references for now (e.g. `&self`)
-                if let ty::Ref(..) = typ.kind() {
-                    return None;
+                // skip mutable references for now (e.g. `&self`)
+                if let ty::Ref(_, _, m) = typ.kind() {
+                    if m.is_mut() {
+                        return None;
+                    }
                 }
                 let boogie_type = self.codegen_type(typ);
                 Some(Stmt::Decl { name, typ: boogie_type })
@@ -185,16 +208,25 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     //}).collect();
                     //assert_eq!(field_types.len(), 1);
                     //let typ = field_types.pop().unwrap();
-                    let phantom_data_field = fields.filter(|f| self.layout_of(f.ty(self.tcx(), args)).is_zst()).exactly_one().unwrap_or_else(|_| panic!());
+                    let phantom_data_field = fields
+                        .filter(|f| self.layout_of(f.ty(self.tcx(), args)).is_zst())
+                        .exactly_one()
+                        .unwrap_or_else(|_| panic!());
                     let phantom_data_type = phantom_data_field.ty(self.tcx(), args);
                     assert!(phantom_data_type.is_phantom_data());
                     let field_type = args.types().exactly_one().unwrap_or_else(|_| panic!());
                     println!("{field_type:?}");
                     let typ = self.codegen_type(field_type);
-                    Type::UnboundedArray { element_type: Box::new(typ), len: 0 }
+                    Type::datatype(String::from("$UnboundedArray"), vec![typ])
                 } else {
                     todo!()
                 }
+            }
+            ty::Ref(_r, ty, m) => {
+                if m.is_not() {
+                    return self.codegen_type(*ty);
+                }
+                todo!()
             }
             _ => todo!(),
         }
@@ -222,12 +254,12 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     .statements
                     .iter()
                     .enumerate()
-                    .filter_map(|(index, stmt)| {
+                    .map(|(index, stmt)| {
                         let s = self.codegen_statement(stmt);
                         if index == 0 {
-                            Some(Stmt::Label { label: label.clone(), statement: Box::new(s) })
+                            Stmt::Label { label: label.clone(), statement: Box::new(s) }
                         } else {
-                            Some(s)
+                            s
                         }
                     })
                     .collect();
@@ -249,6 +281,15 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     let expr = self.codegen_place(rhs);
                     self.ref_to_expr.insert(*place, expr);
                     Stmt::Null
+                } else if is_deref(place) {
+                    // lookup the place itself
+                    debug!(?self.ref_to_expr, ?place, ?place.local, "codegen_statement_assign_deref");
+                    let empty_projection = List::empty();
+                    let place = Place { local: place.local, projection: empty_projection };
+                    let expr = self.ref_to_expr.get(&place).unwrap();
+                    let rv = self.codegen_rvalue(rvalue);
+                    let asgn = Stmt::Assignment { target: expr.to_string(), value: rv.1 };
+                    add_statement(rv.0, asgn)
                 } else {
                     let rv = self.codegen_rvalue(rvalue);
                     // assignment statement
@@ -278,14 +319,40 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         debug!(rvalue=?rvalue, "codegen_rvalue");
         match rvalue {
             Rvalue::Use(operand) => (None, self.codegen_operand(operand)),
+            Rvalue::UnaryOp(op, operand) => self.codegen_unary_op(op, operand),
             Rvalue::BinaryOp(binop, box (lhs, rhs)) => self.codegen_binary_op(binop, lhs, rhs),
             Rvalue::CheckedBinaryOp(binop, box (ref e1, ref e2)) => {
                 // TODO: handle overflow check
                 self.codegen_binary_op(binop, e1, e2)
             }
             Rvalue::Ref(_, _, p) => (None, self.codegen_place(p)),
+            Rvalue::Cast(kind, operand, ty) => {
+                if *kind == CastKind::IntToInt {
+                    let from_type = self.operand_ty(operand);
+                    let o = self.codegen_operand(operand);
+                    let _from = self.codegen_type(from_type);
+                    let _to = self.codegen_type(*ty);
+                    let cast = Expr::function_call(String::from("$BvXToBvY"), vec![o]);
+                    (None, cast)
+                } else {
+                    todo!()
+                }
+            }
             _ => todo!(),
         }
+    }
+
+    fn codegen_unary_op(&self, op: &UnOp, operand: &Operand<'tcx>) -> (Option<Stmt>, Expr) {
+        debug!(op=?op, operand=?operand, "codegen_unary_op");
+        let o = self.codegen_operand(operand);
+        let expr = match op {
+            UnOp::Not => {
+                // TODO: can this be used for bit-level inversion as well?
+                Expr::UnaryOp { op: UnaryOp::Not, operand: Box::new(o) }
+            }
+            UnOp::Neg => Expr::function_call(String::from("$Neg"), vec![o]),
+        };
+        (None, expr)
     }
 
     fn codegen_binary_op(
@@ -322,12 +389,39 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                 };
                 Expr::function_call(bv_func, vec![*left, *right])
             }
+            BinOp::Ge => {
+                let left_type = self.operand_ty(lhs);
+                assert_eq!(left_type, self.operand_ty(rhs));
+                let bv_func = match left_type.kind() {
+                    ty::Int(it) => format!("$SignedLessThanBv{}", it.bit_width().unwrap_or(64)),
+                    ty::Uint(it) => format!("$UnsignedLessThanBv{}", it.bit_width().unwrap_or(64)),
+                    _ => todo!(),
+                };
+                Expr::function_call(
+                    String::from("$Not"),
+                    vec![Expr::function_call(bv_func, vec![*left, *right])],
+                )
+            }
+            BinOp::BitAnd => Expr::function_call(String::from("$And"), vec![*left, *right]),
+            BinOp::BitOr => Expr::function_call(String::from("$Or"), vec![*left, *right]),
+            BinOp::Shr => {
+                let left_ty = self.operand_ty(lhs);
+                let right_ty = self.operand_ty(lhs);
+                debug!(?left_ty, ?right_ty, "codegen_binary_op_shr");
+                Expr::function_call(String::from("$Shr"), vec![*left, *right])
+            }
+            BinOp::Shl => {
+                let left_ty = self.operand_ty(lhs);
+                let right_ty = self.operand_ty(lhs);
+                debug!(?left_ty, ?right_ty, "codegen_binary_op_shl");
+                Expr::function_call(String::from("$Shl"), vec![*left, *right])
+            }
             _ => todo!(),
         };
         (None, expr)
     }
 
-    fn codegen_terminator(&self, term: &Terminator<'tcx>) -> Stmt {
+    fn codegen_terminator(&mut self, term: &Terminator<'tcx>) -> Stmt {
         let _trace_span = debug_span!("CodegenTerminator", statement = ?term.kind).entered();
         debug!("handling terminator {:?}", term);
         match &term.kind {
@@ -343,7 +437,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     }
 
     fn codegen_funcall(
-        &self,
+        &mut self,
         func: &Operand<'tcx>,
         args: &[Operand<'tcx>],
         destination: &Place<'tcx>,
@@ -447,17 +541,18 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     let index = self.codegen_local(i);
                     Expr::Index { base: Box::new(place), index: Box::new(index) }
                 }
-                ProjectionElem::Field(f, t) => {
+                ProjectionElem::Field(f, _t) => {
                     debug!(ty=?local_ty, "codegen_place_fold");
                     match local_ty.kind() {
-                        ty::Adt(def, args) => {
+                        ty::Adt(def, _args) => {
                             let field_name = def.non_enum_variant().fields[f].name.to_string();
                             Expr::Field { base: Box::new(place), field: field_name }
                         }
-                        ty::Tuple(types) => {
+                        ty::Tuple(_types) => {
+                            // TODO: handle tuples
                             place
                         }
-                        _ => todo!()
+                        _ => todo!(),
                     }
                 }
                 _ => {
@@ -474,7 +569,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     }
 
     fn codegen_constant(&self, c: &ConstOperand<'tcx>) -> Expr {
-        trace!(constant=?c, "codegen_constant");
+        debug!(constant=?c, "codegen_constant");
         // TODO: monomorphize
         match c.const_ {
             mirConst::Val(val, ty) => self.codegen_constant_value(val, ty),
@@ -495,14 +590,14 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         match (s, ty.kind()) {
             (Scalar::Int(_), ty::Bool) => Expr::Literal(Literal::Bool(s.to_bool().unwrap())),
             (Scalar::Int(_), ty::Int(it)) => match it {
-                IntTy::I8 => Expr::Literal(Literal::Int(s.to_i8().unwrap().into())),
-                IntTy::I16 => Expr::Literal(Literal::Int(s.to_i16().unwrap().into())),
-                IntTy::I32 => Expr::Literal(Literal::Int(s.to_i32().unwrap().into())),
-                IntTy::I64 => Expr::Literal(Literal::Int(s.to_i64().unwrap().into())),
-                IntTy::I128 => Expr::Literal(Literal::Int(s.to_i128().unwrap().into())),
+                IntTy::I8 => Expr::Literal(Literal::bv(8, s.to_i8().unwrap().into())),
+                IntTy::I16 => Expr::Literal(Literal::bv(16, s.to_i16().unwrap().into())),
+                IntTy::I32 => Expr::Literal(Literal::bv(32, s.to_i32().unwrap().into())),
+                IntTy::I64 => Expr::Literal(Literal::bv(64, s.to_i64().unwrap().into())),
+                IntTy::I128 => Expr::Literal(Literal::bv(128, s.to_i128().unwrap().into())),
                 IntTy::Isize => {
                     // TODO: get target width
-                    Expr::Literal(Literal::Int(s.to_target_isize(self).unwrap().into()))
+                    Expr::Literal(Literal::bv(64, s.to_target_isize(self).unwrap().into()))
                 }
             },
             (Scalar::Int(_), ty::Uint(it)) => match it {
@@ -564,4 +659,12 @@ fn add_statement(s1: Option<Stmt>, s2: Stmt) -> Stmt {
         },
         None => s2,
     }
+}
+
+fn is_deref(p: &Place<'_>) -> bool {
+    let proj = p.projection;
+    if proj.len() == 1 && proj.iter().next().unwrap() == ProjectionElem::Deref {
+        return true;
+    }
+    false
 }

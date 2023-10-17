@@ -6,12 +6,40 @@
 
 pub mod writer;
 
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigInt;
+use std::string::ToString;
 
 struct TypeDeclaration {}
 struct ConstDeclaration {}
 struct VarDeclaration {}
 struct Axiom {}
+
+pub struct DataTypeConstructor {
+    name: String,
+    parameters: Vec<Parameter>,
+}
+
+impl DataTypeConstructor {
+    pub fn new(name: String, parameters: Vec<Parameter>) -> Self {
+        Self { name, parameters }
+    }
+}
+
+pub struct DataTypeDeclaration {
+    name: String,
+    type_parameters: Vec<String>,
+    constructors: Vec<DataTypeConstructor>,
+}
+
+impl DataTypeDeclaration {
+    pub fn new(
+        name: String,
+        type_parameters: Vec<String>,
+        constructors: Vec<DataTypeConstructor>,
+    ) -> Self {
+        Self { name, type_parameters, constructors }
+    }
+}
 
 /// Boogie types
 pub enum Type {
@@ -27,11 +55,36 @@ pub enum Type {
     /// Map type, e.g. `[int]bool`
     Map { key: Box<Type>, value: Box<Type> },
 
+    /// Type parameter
+    Parameter { name: String },
+
     /// Array type
     Array { element_type: Box<Type>, len: usize },
 
-    /// Unbounded array type
-    UnboundedArray { element_type: Box<Type>, len: usize },
+    /// DataType
+    DataType { name: String, type_arguments: Vec<Type> },
+}
+
+impl Type {
+    pub fn bv(width: usize) -> Self {
+        Self::Bv(width)
+    }
+
+    pub fn parameter(name: String) -> Self {
+        Self::Parameter { name }
+    }
+
+    pub fn array(element_type: Box<Type>, len: usize) -> Self {
+        Self::Array { element_type, len }
+    }
+
+    pub fn datatype(name: String, type_arguments: Vec<Type>) -> Self {
+        Self::DataType { name, type_arguments }
+    }
+
+    pub fn map(key: Type, value: Type) -> Self {
+        Self::Map { key: Box::new(key), value: Box::new(value) }
+    }
 }
 
 /// Function and procedure parameters
@@ -53,14 +106,14 @@ pub enum Literal {
     Bool(bool),
 
     /// Bit-vector values, e.g. `5bv8`
-    Bv { width: usize, value: BigUint },
+    Bv { width: usize, value: BigInt },
 
     /// Unbounded integer values, e.g. `1000` or `-456789`
     Int(BigInt),
 }
 
 impl Literal {
-    pub fn bv(width: usize, value: BigUint) -> Self {
+    pub fn bv(width: usize, value: BigInt) -> Self {
         Self::Bv { width, value }
     }
 }
@@ -145,6 +198,15 @@ pub enum Expr {
 impl Expr {
     pub fn function_call(symbol: String, arguments: Vec<Expr>) -> Self {
         Expr::FunctionCall { symbol, arguments }
+    }
+}
+
+impl ToString for Expr {
+    fn to_string(&self) -> String {
+        let mut buf = Vec::new();
+        let mut writer = writer::Writer::new(&mut buf);
+        self.write_to(&mut writer).unwrap();
+        String::from_utf8(buf).unwrap()
     }
 }
 
@@ -271,6 +333,7 @@ pub struct BoogieProgram {
     const_declarations: Vec<ConstDeclaration>,
     var_declarations: Vec<VarDeclaration>,
     axioms: Vec<Axiom>,
+    datatypes: Vec<DataTypeDeclaration>,
     functions: Vec<Function>,
     procedures: Vec<Procedure>,
 }
@@ -282,6 +345,7 @@ impl BoogieProgram {
             const_declarations: Vec::new(),
             var_declarations: Vec::new(),
             axioms: Vec::new(),
+            datatypes: Vec::new(),
             functions: Vec::new(),
             procedures: Vec::new(),
         }
@@ -293,5 +357,9 @@ impl BoogieProgram {
 
     pub fn add_function(&mut self, function: Function) {
         self.functions.push(function);
+    }
+
+    pub fn add_datatype(&mut self, datatype: DataTypeDeclaration) {
+        self.datatypes.push(datatype);
     }
 }

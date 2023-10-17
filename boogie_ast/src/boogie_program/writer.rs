@@ -24,6 +24,9 @@
 //! axiom <expr2>;
 //! ...
 //!
+//! // Datatypes:
+//! datatype <datatype-name> = <constructor1, constructor2, ...>;
+//!
 //! // Functions:
 //! function <function1-name>(<arg1>: <type1>, ...) returns (return-var-name: <return-type>)
 //! {
@@ -116,6 +119,12 @@ impl BoogieProgram {
                 todo!()
             }
         }
+        if !self.datatypes.is_empty() {
+            writeln!(writer, "// Datatypes:")?;
+            for dt in &self.datatypes {
+                dt.write_to(&mut writer)?;
+            }
+        }
         if !self.functions.is_empty() {
             writeln!(writer, "// Functions:")?;
             for f in &self.functions {
@@ -127,6 +136,50 @@ impl BoogieProgram {
             for p in &self.procedures {
                 p.write_to(&mut writer)?;
             }
+        }
+        Ok(())
+    }
+}
+
+impl DataTypeDeclaration {
+    fn write_to<T: Write>(&self, writer: &mut Writer<T>) -> std::io::Result<()> {
+        write!(writer, "datatype {}", self.name)?;
+        if !self.type_parameters.is_empty() {
+            write!(writer, "<")?;
+            for (i, tp) in self.type_parameters.iter().enumerate() {
+                if i > 0 {
+                    write!(writer, ", ")?;
+                }
+                write!(writer, "{tp}")?;
+            }
+            write!(writer, ">")?;
+        }
+        write!(writer, " {{")?;
+        for (i, cons) in self.constructors.iter().enumerate() {
+            if i > 0 {
+                writeln!(writer, ",")?;
+            }
+            cons.write_to(writer)?;
+        }
+        writeln!(writer, " }}")?;
+        writer.newline()?;
+        Ok(())
+    }
+}
+
+impl DataTypeConstructor {
+    fn write_to<T: Write>(&self, writer: &mut Writer<T>) -> std::io::Result<()> {
+        write!(writer, " {}", self.name)?;
+        if !self.parameters.is_empty() {
+            write!(writer, "(")?;
+            for (i, tp) in self.parameters.iter().enumerate() {
+                if i > 0 {
+                    write!(writer, ", ")?;
+                }
+                write!(writer, "{}: ", tp.name)?;
+                tp.typ.write_to(writer)?;
+            }
+            write!(writer, ")")?;
         }
         Ok(())
     }
@@ -392,12 +445,15 @@ impl Type {
                 write!(writer, "]")?;
                 value.write_to(writer)?;
             }
+            Type::DataType { name, type_arguments } => {
+                write!(writer, "{name} ")?;
+                for arg in type_arguments {
+                    arg.write_to(writer)?;
+                }
+            }
+            Type::Parameter { name } => write!(writer, "{name}")?,
             Type::Array { element_type, .. } => {
                 write!(writer, "[bv64]")?;
-                element_type.write_to(writer)?;
-            }
-            Type::UnboundedArray { element_type, len } => {
-                write!(writer, "UnboundedArray ")?;
                 element_type.write_to(writer)?;
             }
         }
@@ -464,6 +520,7 @@ mod tests {
             const_declarations: Vec::new(),
             var_declarations: Vec::new(),
             axioms: Vec::new(),
+            datatypes: Vec::new(),
             functions: Vec::new(),
             procedures: vec![Procedure {
                 name: "main".to_string(),

@@ -112,13 +112,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boogie_ast"
-version = "0.34.0"
-dependencies = [
- "num-bigint",
-]
-
-[[package]]
 name = "bookrunner"
 version = "0.1.0"
 dependencies = [
