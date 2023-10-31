@@ -282,6 +282,11 @@ impl Expr {
                 right.write_to(writer)?;
                 write!(writer, ")")?;
             }
+            Expr::Extract { base, high, low } => {
+                write!(writer, "(")?;
+                base.write_to(writer)?;
+                write!(writer, ")[{high}:{low}]")?;
+            }
             Expr::FunctionCall { symbol, arguments } => {
                 write!(writer, "{symbol}(")?;
                 for (i, a) in arguments.iter().enumerate() {
@@ -297,6 +302,15 @@ impl Expr {
                 write!(writer, "[(")?;
                 index.write_to(writer)?;
                 write!(writer, ")]")?;
+            }
+            Expr::Ite { condition, then_expr, else_expr } => {
+                write!(writer, "if (")?;
+                condition.write_to(writer)?;
+                write!(writer, ") then (")?;
+                then_expr.write_to(writer)?;
+                write!(writer, ") else (")?;
+                else_expr.write_to(writer)?;
+                write!(writer, ")")?;
             }
             Expr::Field { base, field } => {
                 base.write_to(writer)?;
@@ -504,6 +518,7 @@ impl BinaryOp {
             BinaryOp::Gt => write!(writer, ">")?,
             BinaryOp::Lte => write!(writer, "<=")?,
             BinaryOp::Gte => write!(writer, ">=")?,
+            BinaryOp::Concat => write!(writer, "++")?,
         }
         Ok(())
     }

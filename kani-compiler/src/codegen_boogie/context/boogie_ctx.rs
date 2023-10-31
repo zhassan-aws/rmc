@@ -24,34 +24,73 @@ use rustc_middle::ty::layout::{
 use rustc_middle::ty::{self, Instance, IntTy, List, Ty, TyCtxt, UintTy};
 use rustc_span::Span;
 use rustc_target::abi::{HasDataLayout, TargetDataLayout};
-use strum::VariantNames;
+use std::string::ToString;
+use strum::{IntoEnumIterator, VariantNames};
 use tracing::{debug, debug_span, trace};
 
 use super::kani_intrinsic::{get_kani_intrinsic, KaniIntrinsic};
 
-fn unsigned_less_than(width: usize) -> Function {
-    Function::new(
-        format!("$UnsignedLessThanBv{width}"),
-        vec![
-            Parameter::new("lhs".into(), Type::Bv(width)),
-            Parameter::new("rhs".into(), Type::Bv(width)),
-        ],
-        Type::Bool,
-        None,
-        vec![String::from(":bvbuiltin \"bvult\"")],
-    )
+#[derive(Debug, Clone, PartialEq, Eq, strum_macros::AsRefStr, strum_macros::EnumIter)]
+enum SmtBvBuiltin {
+    // Predicates:
+    #[strum(serialize = "$BvUnsignedLessThan")]
+    UnsignedLessThan,
+    #[strum(serialize = "$BvSignedLessThan")]
+    SignedLessThan,
+
+    // Binary operators:
+    #[strum(serialize = "$BvAdd")]
+    Add,
+    #[strum(serialize = "$BvOr")]
+    Or,
+    #[strum(serialize = "$BvAnd")]
+    And,
+    #[strum(serialize = "$BvShl")]
+    Shl,
+    #[strum(serialize = "$BvShr")]
+    Shr,
+
+    // Unary operators:
+    #[strum(serialize = "BvNot")]
+    Not,
 }
 
-fn unsigned_add(width: usize) -> Function {
+impl SmtBvBuiltin {
+    pub fn smt_op_name(&self) -> &'static str {
+        match self {
+            SmtBvBuiltin::UnsignedLessThan => "bvult",
+            SmtBvBuiltin::SignedLessThan => "bvslt",
+            SmtBvBuiltin::Add => "bvadd",
+            SmtBvBuiltin::Or => "bvor",
+            SmtBvBuiltin::And => "bvand",
+            SmtBvBuiltin::Shl => "bvshl",
+            SmtBvBuiltin::Shr => "bvlshr",
+            SmtBvBuiltin::Not => "bvnot",
+        }
+    }
+
+    pub fn is_predicate(&self) -> bool {
+        match self {
+            SmtBvBuiltin::UnsignedLessThan | SmtBvBuiltin::SignedLessThan => true,
+            SmtBvBuiltin::Or
+            | SmtBvBuiltin::And
+            | SmtBvBuiltin::Add
+            | SmtBvBuiltin::Shl
+            | SmtBvBuiltin::Shr
+            | SmtBvBuiltin::Not => false,
+        }
+    }
+}
+
+fn smt_builtin_binop(bv_builtin: &str, smt_name: &str, is_predicate: bool) -> Function {
+    let tp_name = String::from("T");
+    let tp = Type::parameter(tp_name.clone());
     Function::new(
-        format!("$UnsignedAddBv{width}"),
-        vec![
-            Parameter::new("lhs".into(), Type::Bv(width)),
-            Parameter::new("rhs".into(), Type::Bv(width)),
-        ],
-        Type::Bv(width),
+        format!("{bv_builtin}<{tp_name}>"), // e.g. $BvOr<T>
+        vec![Parameter::new("lhs".into(), tp.clone()), Parameter::new("rhs".into(), tp.clone())],
+        if is_predicate { Type::Bool } else { tp },
         None,
-        vec![String::from(":bvbuiltin \"bvadd\"")],
+        vec![format!(":bvbuiltin \"{}\"", smt_name)],
     )
 }
 
@@ -86,8 +125,13 @@ impl<'tcx> BoogieCtx<'tcx> {
     }
 
     fn add_preamble(program: &mut BoogieProgram) {
-        program.add_function(unsigned_less_than(64));
-        program.add_function(unsigned_add(64));
+        for bv_builtin in SmtBvBuiltin::iter() {
+            program.add_function(smt_builtin_binop(
+                bv_builtin.as_ref(),
+                bv_builtin.smt_op_name(),
+                bv_builtin.is_predicate(),
+            ));
+        }
 
         // Add unbounded array
         let name = String::from("$UnboundedArray");
@@ -330,10 +374,22 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                 if *kind == CastKind::IntToInt {
                     let from_type = self.operand_ty(operand);
                     let o = self.codegen_operand(operand);
-                    let _from = self.codegen_type(from_type);
-                    let _to = self.codegen_type(*ty);
-                    let cast = Expr::function_call(String::from("$BvXToBvY"), vec![o]);
-                    (None, cast)
+                    let from = self.codegen_type(from_type);
+                    let to = self.codegen_type(*ty);
+                    let Type::Bv(from_width) = from else { panic!("Expecting bv type in cast") };
+                    let Type::Bv(to_width) = to else { panic!("Expecting bv type in cast") };
+                    let op = if from_width > to_width {
+                        Expr::extract(Box::new(o), to_width, 0)
+                    } else if from_width < to_width {
+                        match from_type.kind() {
+                            ty::Int(_) => Expr::sign_extend(Box::new(o), to_width - from_width),
+                            ty::Uint(_) => Expr::zero_extend(Box::new(o), to_width - from_width),
+                            _ => todo!(),
+                        }
+                    } else {
+                        o
+                    };
+                    (None, op)
                 } else {
                     todo!()
                 }
@@ -350,7 +406,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                 // TODO: can this be used for bit-level inversion as well?
                 Expr::UnaryOp { op: UnaryOp::Not, operand: Box::new(o) }
             }
-            UnOp::Neg => Expr::function_call(String::from("$Neg"), vec![o]),
+            UnOp::Neg => Expr::function_call(SmtBvBuiltin::Not.as_ref().to_owned(), vec![o]),
         };
         (None, expr)
     }
@@ -372,49 +428,40 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     todo!("Addition of different types is not yet supported");
                 } else {
                     let bv_func = match left_type.kind() {
-                        ty::Int(it) => format!("$SignedAddBv{}", it.bit_width().unwrap_or(64)),
-                        ty::Uint(it) => format!("$UnsignedAddBv{}", it.bit_width().unwrap_or(64)),
+                        ty::Int(_) | ty::Uint(_) => SmtBvBuiltin::Add,
                         _ => todo!(),
                     };
-                    Expr::function_call(bv_func, vec![*left, *right])
+                    Expr::function_call(bv_func.as_ref().to_owned(), vec![*left, *right])
                 }
             }
-            BinOp::Lt => {
+            BinOp::Lt | BinOp::Ge => {
                 let left_type = self.operand_ty(lhs);
                 assert_eq!(left_type, self.operand_ty(rhs));
                 let bv_func = match left_type.kind() {
-                    ty::Int(it) => format!("$SignedLessThanBv{}", it.bit_width().unwrap_or(64)),
-                    ty::Uint(it) => format!("$UnsignedLessThanBv{}", it.bit_width().unwrap_or(64)),
+                    ty::Int(_) => SmtBvBuiltin::SignedLessThan,
+                    ty::Uint(_) => SmtBvBuiltin::UnsignedLessThan,
                     _ => todo!(),
                 };
-                Expr::function_call(bv_func, vec![*left, *right])
+                let call = Expr::function_call(bv_func.as_ref().to_owned(), vec![*left, *right]);
+                if let BinOp::Lt = binop { call } else { Expr::not(Box::new(call)) }
             }
-            BinOp::Ge => {
-                let left_type = self.operand_ty(lhs);
-                assert_eq!(left_type, self.operand_ty(rhs));
-                let bv_func = match left_type.kind() {
-                    ty::Int(it) => format!("$SignedLessThanBv{}", it.bit_width().unwrap_or(64)),
-                    ty::Uint(it) => format!("$UnsignedLessThanBv{}", it.bit_width().unwrap_or(64)),
-                    _ => todo!(),
-                };
-                Expr::function_call(
-                    String::from("$Not"),
-                    vec![Expr::function_call(bv_func, vec![*left, *right])],
-                )
+            BinOp::BitAnd => {
+                Expr::function_call(SmtBvBuiltin::And.as_ref().to_owned(), vec![*left, *right])
             }
-            BinOp::BitAnd => Expr::function_call(String::from("$And"), vec![*left, *right]),
-            BinOp::BitOr => Expr::function_call(String::from("$Or"), vec![*left, *right]),
+            BinOp::BitOr => {
+                Expr::function_call(SmtBvBuiltin::Or.as_ref().to_owned(), vec![*left, *right])
+            }
             BinOp::Shr => {
                 let left_ty = self.operand_ty(lhs);
                 let right_ty = self.operand_ty(lhs);
                 debug!(?left_ty, ?right_ty, "codegen_binary_op_shr");
-                Expr::function_call(String::from("$Shr"), vec![*left, *right])
+                Expr::function_call(SmtBvBuiltin::Shr.as_ref().to_owned(), vec![*left, *right])
             }
             BinOp::Shl => {
                 let left_ty = self.operand_ty(lhs);
                 let right_ty = self.operand_ty(lhs);
                 debug!(?left_ty, ?right_ty, "codegen_binary_op_shl");
-                Expr::function_call(String::from("$Shl"), vec![*left, *right])
+                Expr::function_call(SmtBvBuiltin::Shl.as_ref().to_owned(), vec![*left, *right])
             }
             _ => todo!(),
         };

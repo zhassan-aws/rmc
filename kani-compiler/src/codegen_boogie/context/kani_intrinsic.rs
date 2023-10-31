@@ -20,26 +20,26 @@ use super::boogie_ctx::FunctionCtx;
 #[derive(Debug, Clone, PartialEq, Eq, EnumString, EnumVariantNames)]
 pub enum KaniIntrinsic {
     /// Kani assert statement (`kani::assert`)
-    Assert,
+    KaniAssert,
 
     /// Kani assume statement (`kani::assume`)
-    Assume,
+    KaniAssume,
 
     /// Kani symbolic variable (`kani::any`)
-    AnyRaw,
+    KaniAnyRaw,
 
     /// Kani unbounded array (`kani::array::any`)
-    AnyArray,
+    KaniAnyArray,
 
-    AnyArraySet,
+    KaniAnyArraySet,
 
-    AnyArrayGet,
+    KaniAnyArrayGet,
 
-    AnyArrayLen,
+    KaniAnyArrayLen,
 
-    AnyArrayIndex,
+    KaniAnyArrayIndex,
 
-    AnyArrayIndexMut,
+    KaniAnyArrayIndexMut,
 }
 
 /// If provided function is a Kani intrinsic (e.g. assert, assume, cover),
@@ -67,38 +67,37 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         &mut self,
         intrinsic: KaniIntrinsic,
         instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         target: Option<BasicBlock>,
         span: Option<Span>,
     ) -> Stmt {
         match intrinsic {
-            KaniIntrinsic::Assert => {
+            KaniIntrinsic::KaniAssert => {
                 self.codegen_kani_assert(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::Assume => {
+            KaniIntrinsic::KaniAssume => {
                 self.codegen_kani_assume(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::AnyRaw => {
+            KaniIntrinsic::KaniAnyRaw => {
                 self.codegen_kani_any_raw(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::AnyArray => {
+            KaniIntrinsic::KaniAnyArray => {
                 self.codegen_kani_any_array(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::AnyArraySet => {
+            KaniIntrinsic::KaniAnyArraySet => {
                 self.codegen_kani_any_array_set(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::AnyArrayGet => {
+            KaniIntrinsic::KaniAnyArrayGet => {
                 self.codegen_kani_any_array_get(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::AnyArrayLen => {
+            KaniIntrinsic::KaniAnyArrayLen => {
                 self.codegen_kani_any_array_len(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::AnyArrayIndex => {
+            KaniIntrinsic::KaniAnyArrayIndex => {
                 self.codegen_kani_any_array_index(instance, args, assign_to, target, span)
             }
-            KaniIntrinsic::AnyArrayIndexMut => {
+            KaniIntrinsic::KaniAnyArrayIndexMut => {
                 self.codegen_kani_any_array_index_mut(instance, args, assign_to, target, span)
             }
         }
@@ -129,7 +128,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_assume(
         &self,
         _instance: Instance<'tcx>,
-        //mut fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         _assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
@@ -150,7 +148,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_raw(
         &self,
         _instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         target: Option<BasicBlock>,
@@ -177,7 +174,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_array(
         &self,
         instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         target: Option<BasicBlock>,
@@ -191,7 +187,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_array_set(
         &self,
         _instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         _assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
@@ -230,7 +225,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_array_get(
         &self,
         _instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
@@ -262,7 +256,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_array_len(
         &self,
         _instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
@@ -288,7 +281,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_array_index(
         &self,
         instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         target: Option<BasicBlock>,
@@ -300,7 +292,6 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
     pub fn codegen_kani_any_array_index_mut(
         &mut self,
         _instance: Instance<'tcx>,
-        //fargs: Vec<Expr>,
         args: &[Operand<'tcx>],
         assign_to: Place<'tcx>,
         _target: Option<BasicBlock>,
