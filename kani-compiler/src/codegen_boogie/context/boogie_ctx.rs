@@ -15,7 +15,7 @@ use rustc_middle::mir::traversal::reverse_postorder;
 use rustc_middle::mir::{
     BasicBlock, BasicBlockData, BinOp, Body, CastKind, Const as mirConst, ConstOperand, ConstValue,
     HasLocalDecls, Local, Operand, Place, ProjectionElem, Rvalue, Statement, StatementKind,
-    SwitchTargets, Terminator, TerminatorKind, UnOp,
+    SwitchTargets, Terminator, TerminatorKind, UnOp, VarDebugInfoContents,
 };
 use rustc_middle::span_bug;
 use rustc_middle::ty::layout::{
@@ -24,11 +24,14 @@ use rustc_middle::ty::layout::{
 use rustc_middle::ty::{self, Instance, IntTy, List, Ty, TyCtxt, UintTy};
 use rustc_span::Span;
 use rustc_target::abi::{HasDataLayout, TargetDataLayout};
+use std::collections::hash_map::Entry;
 use std::string::ToString;
-use strum::{IntoEnumIterator, VariantNames};
+use strum::IntoEnumIterator;
 use tracing::{debug, debug_span, trace};
 
-use super::kani_intrinsic::{get_kani_intrinsic, KaniIntrinsic};
+use super::kani_intrinsic::get_kani_intrinsic;
+
+const UNBOUNDED_ARRAY: &'static str = "$UnboundedArray";
 
 #[derive(Debug, Clone, PartialEq, Eq, strum_macros::AsRefStr, strum_macros::EnumIter)]
 enum SmtBvBuiltin {
@@ -104,8 +107,6 @@ pub struct BoogieCtx<'tcx> {
     pub queries: QueryDb,
     /// the Boogie program
     program: BoogieProgram,
-    /// Kani intrinsics
-    pub intrinsics: Vec<String>,
 }
 
 /// A context for translating a function that holds the information needed
@@ -120,11 +121,11 @@ impl<'tcx> BoogieCtx<'tcx> {
             tcx,
             queries,
             program,
-            intrinsics: KaniIntrinsic::VARIANTS.iter().map(|s| (*s).into()).collect(),
         }
     }
 
     fn add_preamble(program: &mut BoogieProgram) {
+        // Add SMT bv builtins
         for bv_builtin in SmtBvBuiltin::iter() {
             program.add_function(smt_builtin_binop(
                 bv_builtin.as_ref(),
@@ -134,7 +135,7 @@ impl<'tcx> BoogieCtx<'tcx> {
         }
 
         // Add unbounded array
-        let name = String::from("$UnboundedArray");
+        let name = String::from(UNBOUNDED_ARRAY);
         let constructor = DataTypeConstructor::new(
             name.clone(),
             vec![
@@ -187,6 +188,8 @@ pub struct FunctionCtx<'a, 'tcx> {
     bcx: &'a BoogieCtx<'tcx>,
     instance: Instance<'tcx>,
     mir: &'a Body<'tcx>,
+    /// Maps from local to the name of the corresponding Boogie variable.
+    local_names: FxHashMap<Local, String>,
     pub(crate) ref_to_expr: FxHashMap<Place<'tcx>, Expr>,
 }
 
@@ -196,7 +199,37 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         instance: Instance<'tcx>,
         mir: &'a Body<'tcx>,
     ) -> FunctionCtx<'a, 'tcx> {
-        Self { bcx, instance, mir, ref_to_expr: FxHashMap::default() }
+        // create names for all locals
+        let mut local_names = FxHashMap::default();
+        let mut name_occurrences: FxHashMap<String, usize> = FxHashMap::default();
+        let ldecls = mir.local_decls();
+        for local in ldecls.indices() {
+            let debug_info = mir.var_debug_info.iter().find(|info| match info.value {
+                VarDebugInfoContents::Place(p) => p.local == local && p.projection.len() == 0,
+                VarDebugInfoContents::Const(_) => false,
+            });
+            let name = if let Some(debug_info) = debug_info {
+                let base_name = format!("{}", debug_info.name);
+                let entry = name_occurrences.entry(base_name.clone());
+                let name = match entry {
+                    Entry::Occupied(mut o) => {
+                        let occ = o.get_mut();
+                        let index = *occ;
+                        *occ += 1;
+                        format!("{base_name}_{}", index)
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert(1);
+                        base_name
+                    }
+                };
+                name
+            } else {
+                format!("{local:?}")
+            };
+            local_names.insert(local, name);
+        }
+        Self { bcx, instance, mir, local_names, ref_to_expr: FxHashMap::default() }
     }
 
     pub fn codegen_declare_variables(&self) -> Vec<Stmt> {
@@ -206,7 +239,8 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
             .enumerate()
             .filter_map(|(_idx, lc)| {
                 let typ = ldecls[lc].ty;
-                debug!(?lc, ?typ, "codegen_declare_variables");
+                let source_info = ldecls[lc].source_info;
+                debug!(?lc, ?typ, ?source_info, "codegen_declare_variables");
                 let typ = self.instance.instantiate_mir_and_normalize_erasing_regions(
                     self.tcx(),
                     ty::ParamEnv::reveal_all(),
@@ -215,8 +249,8 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                 if self.layout_of(typ).is_zst() {
                     return None;
                 }
-                let name = format!("{lc:?}");
-                // skip mutable references for now (e.g. `&self`)
+                let name = self.local_names[&lc].clone();
+                // skip the declaration of mutable references (e.g. `let mut _9: &mut i32;`)
                 if let ty::Ref(_, _, m) = typ.kind() {
                     if m.is_mut() {
                         return None;
@@ -259,9 +293,8 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
                     let phantom_data_type = phantom_data_field.ty(self.tcx(), args);
                     assert!(phantom_data_type.is_phantom_data());
                     let field_type = args.types().exactly_one().unwrap_or_else(|_| panic!());
-                    println!("{field_type:?}");
                     let typ = self.codegen_type(field_type);
-                    Type::datatype(String::from("$UnboundedArray"), vec![typ])
+                    Type::datatype(String::from(UNBOUNDED_ARRAY), vec![typ])
                 } else {
                     todo!()
                 }
@@ -320,7 +353,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
         match &stmt.kind {
             StatementKind::Assign(box (place, rvalue)) => {
                 debug!(?place, ?rvalue, "codegen_statement");
-                let place_name = format!("{:?}", place.local);
+                let place_name = self.local_names[&place.local].clone();
                 if let Rvalue::Ref(_, _, rhs) = rvalue {
                     let expr = self.codegen_place(rhs);
                     self.ref_to_expr.insert(*place, expr);
@@ -612,7 +645,7 @@ impl<'a, 'tcx> FunctionCtx<'a, 'tcx> {
 
     fn codegen_local(&self, local: Local) -> Expr {
         // TODO: handle function definitions
-        Expr::Symbol { name: format!("{local:?}") }
+        Expr::Symbol { name: self.local_names[&local].clone() }
     }
 
     fn codegen_constant(&self, c: &ConstOperand<'tcx>) -> Expr {
