@@ -31,7 +31,7 @@ use tracing::{debug, debug_span, trace};
 
 use super::kani_intrinsic::get_kani_intrinsic;
 
-const UNBOUNDED_ARRAY: &'static str = "$UnboundedArray";
+const UNBOUNDED_ARRAY: &'static str = "$Array";
 
 #[derive(Debug, Clone, PartialEq, Eq, strum_macros::AsRefStr, strum_macros::EnumIter)]
 enum SmtBvBuiltin {
