@@ -9,6 +9,7 @@ use cbmc::goto_program::{Expr, Location, Stmt, Type};
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_smir::rustc_internal;
 use rustc_target::abi::{FieldsShape, Primitive, TagEncoding, Variants};
+use stable_mir::abi::PassMode;
 use stable_mir::mir::mono::{Instance, InstanceKind};
 use stable_mir::mir::{
     AssertMessage, BasicBlockIdx, CopyNonOverlapping, NonDivergingIntrinsic, Operand, Place,
@@ -474,14 +475,22 @@ impl<'tcx> GotocCtx<'tcx> {
     /// N.B. public only because instrinsics use this directly, too.
     /// When `skip_zst` is set to `true`, the return value will not include any argument that is ZST.
     /// This is used because we ignore ZST arguments, except for intrinsics.
-    pub(crate) fn codegen_funcall_args(&mut self, args: &[Operand], skip_zst: bool) -> Vec<Expr> {
+    pub(crate) fn codegen_funcall_args(
+        &mut self,
+        args: &[Operand],
+        pass_mode: Option<&[PassMode]>,
+        skip_zst: bool,
+    ) -> Vec<Expr> {
         let fargs = args
             .iter()
-            .filter_map(|op| {
+            .enumerate()
+            .filter_map(|(index, op)| {
                 let op_ty = self.operand_ty_stable(op);
                 if op_ty.kind().is_bool() {
                     Some(self.codegen_operand_stable(op).cast_to(Type::c_bool()))
-                } else if !self.is_zst_stable(op_ty) || !skip_zst {
+                } else if (!self.is_zst_stable(op_ty) || !skip_zst)
+                    && (pass_mode.is_none() || pass_mode.unwrap()[index] != PassMode::Ignore)
+                {
                     Some(self.codegen_operand_stable(op))
                 } else {
                     // We ignore ZST types.
@@ -527,7 +536,15 @@ impl<'tcx> GotocCtx<'tcx> {
 
         let loc = self.codegen_span_stable(span);
         let funct = self.operand_ty_stable(func);
-        let mut fargs = self.codegen_funcall_args(&args, true);
+        let pass_mode: Option<Vec<PassMode>> = match funct.kind() {
+            TyKind::RigidTy(RigidTy::FnDef(def, subst)) => {
+                let instance = Instance::resolve(def, &subst).unwrap();
+                let fn_abi = instance.fn_abi().unwrap().args;
+                Some(fn_abi.iter().map(|arg_abi| arg_abi.mode.clone()).collect())
+            }
+            _ => None,
+        };
+        let mut fargs = self.codegen_funcall_args(&args, pass_mode.as_deref(), true);
         match funct.kind() {
             TyKind::RigidTy(RigidTy::FnDef(def, subst)) => {
                 let instance = Instance::resolve(def, &subst).unwrap();
