@@ -87,6 +87,8 @@ pub enum UnstableFeature {
     /// Automatically check that no invalid value is produced which is considered UB in Rust.
     /// Note that this does not include checking uninitialized value.
     ValidValueChecks,
+    /// Aeneas/LLBC
+    Aeneas,
 }
 
 impl UnstableFeature {
