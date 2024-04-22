@@ -100,12 +100,14 @@ fn backend(queries: Arc<Mutex<QueryDb>>) -> Box<dyn CodegenBackend> {
         BackendOption::Aeneas => aeneas_backend(queries),
         BackendOption::CProver => cprover_backend(queries),
     }
- }
+}
 
 /// Fallback backend. It will trigger an error if no backend has been enabled.
 #[cfg(not(any(feature = "aeneas", feature = "cprover")))]
 fn backend(queries: Arc<Mutex<QueryDb>>) -> Box<CodegenBackend> {
-    compile_error!("No backend is available. Only supported values today are `aeneas` and `cprover`");
+    compile_error!(
+        "No backend is available. Only supported values today are `aeneas` and `cprover`"
+    );
 }
 
 /// A stable (across compilation sessions) identifier for the harness function.

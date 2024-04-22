@@ -6,9 +6,7 @@
 use crate::args::ReachabilityType;
 use crate::kani_middle::attributes::KaniAttributes;
 use crate::kani_middle::provide;
-use crate::kani_middle::reachability::{
-    collect_reachable_items, filter_crate_items,
-};
+use crate::kani_middle::reachability::{collect_reachable_items, filter_crate_items};
 use crate::kani_middle::transform::BodyTransformation;
 use crate::kani_middle::{check_reachable_items, dump_mir_items};
 use crate::kani_queries::QueryDb;
@@ -23,7 +21,7 @@ use rustc_codegen_ssa::{CodegenResults, CrateInfo};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::temp_dir::MaybeTempDir;
 use rustc_errors::{ErrorGuaranteed, DEFAULT_LOCALE_RESOURCE};
-use rustc_hir::def_id::{DefId as InternalDefId};
+use rustc_hir::def_id::DefId as InternalDefId;
 use rustc_metadata::creader::MetadataLoaderDyn;
 use rustc_metadata::fs::{emit_wrapper_file, METADATA_FILENAME};
 use rustc_metadata::EncodedMetadata;
@@ -111,7 +109,9 @@ impl LlbcCodegenBackend {
                 // then we move on to codegen
                 for item in &items {
                     match *item {
-                        MonoItem::Fn(_instance) => {
+                        MonoItem::Fn(instance) => {
+                            debug!("About to translate function:\n{:?}", instance.def);
+
                             //gcx.call_with_panic_debug_info(
                             //    |ctx| ctx.codegen_function(instance),
                             //    format!(
@@ -242,7 +242,6 @@ impl CodegenBackend for LlbcCodegenBackend {
             }
 
             if reachability != ReachabilityType::None {
-
                 if reachability != ReachabilityType::Harnesses {
                     // In a workspace, cargo seems to be using the same file prefix to build a crate that is
                     // a package lib and also a dependency of another package.
@@ -335,10 +334,7 @@ fn contract_metadata_for_harness(
 }
 
 /// Return a struct that contains information about the codegen results as expected by `rustc`.
-fn codegen_results(
-    tcx: TyCtxt,
-    rustc_metadata: EncodedMetadata,
-) -> Box<dyn Any> {
+fn codegen_results(tcx: TyCtxt, rustc_metadata: EncodedMetadata) -> Box<dyn Any> {
     let work_products = FxIndexMap::<WorkProductId, WorkProduct>::default();
     Box::new((
         CodegenResults {

@@ -42,7 +42,7 @@ members = [
   "tools/build-kani",
   "kani-driver",
   "kani-compiler",
-  "kani_metadata",
+  "kani_metadata", "llbc",
 ]
 
 # This indicates what package to e.g. build with 'cargo build' without --workspace

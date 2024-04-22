@@ -70,7 +70,6 @@ impl KaniSession {
         to_rustc_arg(vec![format!("--reachability={}", self.reachability_mode())])
     }
 
-
     pub fn backend_arg(&self) -> Option<String> {
         if self.args.common_args.unstable_features.contains(UnstableFeature::Aeneas) {
             Some(to_rustc_arg(vec!["--backend=aeneas".into()]))
@@ -78,7 +77,6 @@ impl KaniSession {
             None
         }
     }
-
 
     /// These arguments are arguments passed to kani-compiler that are `kani` compiler specific.
     pub fn kani_compiler_flags(&self) -> Vec<String> {
