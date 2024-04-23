@@ -1,7 +1,7 @@
 use llbc::common::*;
 use llbc::formatter::{AstFormatter, Formatter, IntoFormatter};
 use llbc::gast::*;
-use crate::graphs::*;
+use crate::codegen_aeneas_llbc::translate::graphs::*;
 use crate::codegen_aeneas_llbc::translate::translate_ctx::TransCtx;
 use llbc::types::*;
 use llbc::ullbc_ast::*;
