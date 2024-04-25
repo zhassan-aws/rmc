@@ -3,20 +3,21 @@ use llbc::common::*;
 use llbc::formatter::{DeclFormatter, FmtCtx, Formatter, IntoFormatter};
 use llbc::gast::*;
 use llbc::llbc_ast;
-use llbc::meta::{self, Attribute, ItemMeta, Span};
+use llbc::meta::{self, Attribute, Span};
 use llbc::meta::{FileId, FileName, InlineAttr, LocalFileId, Meta, VirtualFileId};
-use llbc::names::Name;
-//use crate::reorder_decls::{AnyTransId, DeclarationGroup, DeclarationsGroups, GDeclarationGroup};
+use llbc::names::{Disambiguator, ImplElem, ImplElemKind, Name, PathElem};
+use crate::codegen_aeneas_llbc::translate::reorder_decls::{AnyTransId, DeclarationGroup, DeclarationsGroups, GDeclarationGroup};
 //use crate::translate_predicates::NonLocalTraitClause;
+use llbc::{error, trace};
 use llbc::types::*;
 use llbc::ullbc_ast as ast;
-use llbc::values::*;
 use im::OrdMap;
 use linked_hash_set::LinkedHashSet;
-use macros::VariantIndexArity;
+use llbc_macros::VariantIndexArity;
 use rustc_error_messages::MultiSpan;
 use rustc_hir::def_id::DefId;
 use rustc_hir::Node as HirNode;
+use rustc_hir::Item;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
 use std::cmp::{Ord, Ordering, PartialOrd};
@@ -36,8 +37,8 @@ pub(crate) use register_error_or_panic;
 /// Macro to either panic or return on error, depending on the CLI options
 macro_rules! error_or_panic {
     ($ctx:expr, $span:expr, $msg:expr) => {{
-        $crate::translate_ctx::register_error_or_panic!($ctx, $span, $msg);
-        let e = crate::common::Error {
+        $crate::codegen_aeneas_llbc::translate::translate_ctx::register_error_or_panic!($ctx, $span, $msg);
+        let e = Error {
             span: $span,
             msg: $msg.to_string(),
         };
@@ -51,12 +52,12 @@ macro_rules! error_assert {
     ($ctx:expr, $span: expr, $b: expr) => {
         if !$b {
             let msg = format!("assertion failure: {:?}", stringify!($b));
-            $crate::translate_ctx::error_or_panic!($ctx, $span, msg);
+            $crate::codegen_aeneas_llbc::translate::translate_ctx::error_or_panic!($ctx, $span, msg);
         }
     };
     ($ctx:expr, $span: expr, $b: expr, $msg: expr) => {
         if !$b {
-            $crate::translate_ctx::error_or_panic!($ctx, $span, $msg);
+            $crate::codegen_aeneas_llbc::translate::translate_ctx::error_or_panic!($ctx, $span, $msg);
         }
     };
 }
@@ -67,13 +68,13 @@ macro_rules! error_assert_then {
     ($ctx:expr, $span: expr, $b: expr, $then: expr) => {
         if !$b {
             let msg = format!("assertion failure: {:?}", stringify!($b));
-            $crate::translate_ctx::register_error_or_panic!($ctx, $span, msg);
+            $crate::codegen_aeneas_llbc::translate::translate_ctx::register_error_or_panic!($ctx, $span, msg);
             $then;
         }
     };
     ($ctx:expr, $span: expr, $b: expr, $then: expr, $msg:expr) => {
         if !$b {
-            $crate::translate_ctx::register_error_or_panic!($ctx, $span, $msg);
+            $crate::codegen_aeneas_llbc::translate::translate_ctx::register_error_or_panic!($ctx, $span, $msg);
             $then;
         }
     };
@@ -84,7 +85,7 @@ pub(crate) use error_assert_then;
 /// dependencies, especially if some external dependencies don't extract:
 /// we use this information to tell the user what is the code which
 /// (transitively) lead to the extraction of those problematic dependencies.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct DepSource {
     pub src_id: DefId,
     pub span: rustc_span::Span,
@@ -136,26 +137,6 @@ impl OrdRustId {
             | OrdRustId::Fun(id)
             | OrdRustId::Type(id) => *id,
         }
-    }
-}
-
-impl PartialOrd for OrdRustId {
-    fn partial_cmp(&self, other: &OrdRustId) -> Option<Ordering> {
-        let (vid0, _) = self.variant_index_arity();
-        let (vid1, _) = other.variant_index_arity();
-        if vid0 != vid1 {
-            Option::Some(vid0.cmp(&vid1))
-        } else {
-            let id0 = self.get_id();
-            let id1 = other.get_id();
-            Option::Some(id0.cmp(&id1))
-        }
-    }
-}
-
-impl Ord for OrdRustId {
-    fn cmp(&self, other: &OrdRustId) -> Ordering {
-        self.partial_cmp(other).unwrap()
     }
 }
 
@@ -239,8 +220,6 @@ pub(crate) struct BodyTransCtx<'tcx, 'ctx, 'ctx1> {
     pub def_id: DefId,
     /// The translation context containing the top-level definitions/ids.
     pub t_ctx: &'ctx mut TransCtx<'tcx, 'ctx1>,
-    /// A hax state with an owner id
-    pub hax_state: hax::State<hax::Base<'tcx>, (), (), rustc_hir::def_id::DefId>,
     /// The regions.
     /// We use DeBruijn indices, so we have a stack of regions.
     /// See the comments for [Region::BVar].
@@ -257,9 +236,6 @@ pub(crate) struct BodyTransCtx<'tcx, 'ctx, 'ctx1> {
     /// This means that we consider the free regions as belonging to the first
     /// group of bound regions.
     ///
-    /// The [bound_region_vars] field below takes care of the regions which
-    /// are bound in the Rustc representation.
-    pub free_region_vars: std::collections::BTreeMap<hax::Region, RegionId::Id>,
     ///
     /// The stack of late-bound parameters (can only be lifetimes for now), which
     /// use DeBruijn indices (the other parameters use free variables).
@@ -311,14 +287,6 @@ pub(crate) struct BodyTransCtx<'tcx, 'ctx, 'ctx1> {
     /// here because we might generate several fresh indices before actually
     /// adding the resulting blocks to the map.
     pub blocks: im::OrdMap<ast::BlockId::Id, ast::BlockData>,
-    /// The map from rust blocks to translated blocks.
-    /// Note that when translating terminators like DropAndReplace, we might have
-    /// to introduce new blocks which don't appear in the original MIR.
-    pub blocks_map: ast::BlockId::MapGenerator<hax::BasicBlock>,
-    /// We register the blocks to translate in a stack, so as to avoid
-    /// writing the translation functions as recursive functions. We do
-    /// so because we had stack overflows in the past.
-    pub blocks_stack: VecDeque<hax::BasicBlock>,
 }
 
 impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
@@ -329,9 +297,9 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
     pub fn span_err_no_register<S: Into<MultiSpan>>(&self, span: S, msg: &str) {
         let msg = msg.to_string();
         if self.errors_as_warnings {
-            self.session.span_warn(span, msg);
+            self.session.dcx().span_warn(span, msg);
         } else {
-            self.session.span_err(span, msg);
+            self.session.dcx().span_err(span, msg);
         }
     }
 
@@ -369,31 +337,8 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
         }
     }
 
-    /// Compute the meta information for a Rust definition identified by its id.
-    pub(crate) fn translate_meta_from_rid(&mut self, def_id: DefId) -> Meta {
-        // Retrieve the span from the def id
-        let rspan = meta::get_rspan_from_def_id(self.tcx, def_id);
-        let rspan = rspan.sinto(&self.hax_state);
-        self.translate_meta_from_rspan(rspan)
-    }
-
-    /// Compute the meta information for a Rust item identified by its id.
-    pub(crate) fn translate_item_meta_from_rid(&mut self, def_id: DefId) -> ItemMeta {
-        let meta = self.translate_meta_from_rid(def_id);
-        // Default to `false` for impl blocks and closures.
-        let public = self
-            .translate_visibility_from_rid(def_id, meta.span)
-            .unwrap_or(false);
-        ItemMeta {
-            meta,
-            attributes: self.translate_attributes_from_rid(def_id),
-            inline: self.translate_inline_from_rid(def_id),
-            public,
-        }
-    }
-
-    pub fn translate_span(&mut self, rspan: hax::Span) -> meta::Span {
-        let filename = meta::convert_filename(&rspan.filename);
+    pub fn translate_span(&mut self) -> meta::Span {
+        let filename = FileName::Local("foo".into()); //meta::convert_filename(&rspan.filename);
         let file_id = match &filename {
             FileName::NotReal(_) => {
                 // For now we forbid not real filenames
@@ -402,15 +347,15 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
             FileName::Virtual(_) | FileName::Local(_) => self.register_file(filename),
         };
 
-        let beg = meta::convert_loc(rspan.lo);
-        let end = meta::convert_loc(rspan.hi);
+        let beg = meta::Loc { line: 0, col: 0};  // meta::convert_loc(rspan.lo);
+        let end = meta::Loc { line: 0, col: 0};  // meta::convert_loc(rspan.hi);
 
         // Put together
         meta::Span {
             file_id,
             beg,
             end,
-            rust_span_data: rspan.rust_span_data.unwrap(),
+            //rust_span_data: rspan.rust_span_data.unwrap(),
         }
     }
 
@@ -422,7 +367,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
     ) -> Meta {
         // Translate the span
         let mut scope_data = source_scopes.get(source_info.scope).unwrap();
-        let span = self.translate_span(scope_data.span.clone());
+        let span = self.translate_span();//scope_data.span.clone());
 
         // Lookup the top-most inlined parent scope.
         if scope_data.inlined_parent_scope.is_some() {
@@ -431,7 +376,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                 scope_data = source_scopes.get(parent_scope).unwrap();
             }
 
-            let parent_span = self.translate_span(scope_data.span.clone());
+            let parent_span = self.translate_span();//scope_data.span.clone());
 
             Meta {
                 span: parent_span,
@@ -448,7 +393,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
     // TODO: rename
     pub(crate) fn translate_meta_from_rspan(&mut self, rspan: hax::Span) -> Meta {
         // Translate the span
-        let span = self.translate_span(rspan);
+        let span = self.translate_span();//rspan);
 
         Meta {
             span,
@@ -532,9 +477,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
             | Ctor { .. }
             | ExternCrate
             | ForeignMod
-            | Generator
             | GlobalAsm
-            | ImplTraitPlaceholder
             | InlineConst
             | LifetimeParam
             | OpaqueTy
@@ -643,7 +586,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
         src: &Option<DepSource>,
         id: DefId,
     ) -> Result<Option<ast::TraitDeclId::Id>, Error> {
-        use crate::assumed;
+        use llbc::assumed;
         if assumed::IGNORE_BUILTIN_MARKER_TRAITS {
             let name = self.def_id_to_name(id)?;
             if assumed::is_marker_trait(&name) {
@@ -772,7 +715,6 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
 impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
     /// Create a new `ExecContext`.
     pub(crate) fn new(def_id: DefId, t_ctx: &'ctx mut TransCtx<'tcx, 'ctx1>) -> Self {
-        let hax_state = t_ctx.make_hax_state_with_id(def_id);
         let mut trait_clauses_counter = TraitClauseId::Generator::new();
         let trait_instance_id_gen = Box::new(move || {
             let id = trait_clauses_counter.fresh_id();
@@ -781,7 +723,6 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
         BodyTransCtx {
             def_id,
             t_ctx,
-            hax_state,
             region_vars: im::vector![RegionId::Vector::new()],
             free_region_vars: std::collections::BTreeMap::new(),
             bound_region_vars: im::Vector::new(),
@@ -991,7 +932,7 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
             .filter_map(|(_, x)| x.to_local_trait_clause())
             .collect();
         // Sanity check
-        if !crate::assumed::IGNORE_BUILTIN_MARKER_TRAITS {
+        if !llbc::assumed::IGNORE_BUILTIN_MARKER_TRAITS {
             assert!(clauses
                 .iter()
                 .enumerate()
@@ -1107,22 +1048,6 @@ impl<'tcx, 'ctx, 'ctx1, 'a> IntoFormatter for &'a BodyTransCtx<'tcx, 'ctx, 'ctx1
     }
 }
 
-impl<'a> FmtCtx<'a> {
-    fn fmt_decl_group<Id: Copy>(
-        &self,
-        f: &mut fmt::Formatter,
-        gr: &GDeclarationGroup<Id>,
-    ) -> fmt::Result
-    where
-        Self: DeclFormatter<Id>,
-    {
-        for id in gr.get_ids() {
-            writeln!(f, "{}\n", self.format_decl(id))?
-        }
-        fmt::Result::Ok(())
-    }
-}
-
 impl<'tcx, 'ctx> fmt::Display for TransCtx<'tcx, 'ctx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let fmt: FmtCtx = self.into_fmt();
@@ -1154,11 +1079,11 @@ impl<'tcx, 'ctx> fmt::Display for TransCtx<'tcx, 'ctx> {
                 for gr in ordered_decls {
                     use DeclarationGroup::*;
                     match gr {
-                        Type(gr) => fmt.fmt_decl_group(f, gr)?,
-                        Fun(gr) => fmt.fmt_decl_group(f, gr)?,
-                        Global(gr) => fmt.fmt_decl_group(f, gr)?,
-                        TraitDecl(gr) => fmt.fmt_decl_group(f, gr)?,
-                        TraitImpl(gr) => fmt.fmt_decl_group(f, gr)?,
+                        Type(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
+                        Fun(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
+                        Global(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
+                        TraitDecl(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
+                        TraitImpl(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
                     }
                 }
             }
@@ -1204,7 +1129,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                 for gr in ordered_decls {
                     use DeclarationGroup::*;
                     match gr {
-                        Type(gr) => fmt.fmt_decl_group(f, gr)?,
+                        Type(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
                         Fun(gr) => {
                             for id in gr.get_ids() {
                                 match llbc_funs.get(id) {
@@ -1221,8 +1146,8 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                                 }
                             }
                         }
-                        TraitDecl(gr) => fmt.fmt_decl_group(f, gr)?,
-                        TraitImpl(gr) => fmt.fmt_decl_group(f, gr)?,
+                        TraitDecl(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
+                        TraitImpl(gr) => fmt.fmt_decl_group(f, &gr.get_ids())?,
                     }
                 }
             }
@@ -1363,25 +1288,25 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                     let id = cur_id;
 
                     // Translate to hax types
-                    let s1 = &hax::State::new_from_state_and_id(&self.hax_state, id);
-                    let substs =
-                        rustc_middle::ty::subst::InternalSubsts::identity_for_item(tcx, id)
-                            .sinto(s1);
+                    //let s1 = &hax::State::new_from_state_and_id(&self.hax_state, id);
+                    //let substs =
+                    //    rustc_middle::ty::GenericArgs::identity_for_item(tcx, id)
+                    //        .sinto(s1);
                     // TODO: use the bounds
-                    let _bounds: Vec<hax::Predicate> = tcx
-                        .predicates_of(id)
-                        .predicates
-                        .iter()
-                        .map(|(x, _)| x.sinto(s1))
-                        .collect();
-                    let ty = tcx.type_of(id).subst_identity().sinto(s1);
+                    //let _bounds: Vec<hax::Predicate> = tcx
+                    //    .predicates_of(id)
+                    //    .predicates
+                    //    .iter()
+                    //    .map(|(x, _)| x.sinto(s1))
+                    //    .collect();
+                    //let ty = tcx.type_of(id).subst_identity().sinto(s1);
 
                     // Translate from hax to LLBC
                     let mut bt_ctx = BodyTransCtx::new(id, self);
 
-                    bt_ctx
-                        .translate_generic_params_from_hax(span, &substs)
-                        .unwrap();
+                    //bt_ctx
+                    //    .translate_generic_params_from_hax(span, &substs)
+                    //    .unwrap();
                     bt_ctx.translate_predicates_of(None, id).unwrap();
                     let erase_regions = false;
                     // Two cases, depending on whether the impl block is
@@ -1390,8 +1315,8 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                     let kind = match bt_ctx.t_ctx.tcx.impl_trait_ref(id) {
                         None => {
                             // Inherent impl ("regular" impl)
-                            let ty = bt_ctx.translate_ty(span, erase_regions, &ty).unwrap();
-                            ImplElemKind::Ty(ty)
+                            //let ty = bt_ctx.translate_ty(span, erase_regions, &ty).unwrap();
+                            ImplElemKind::Ty(Ty::Never)
                         }
                         Some(trait_ref) => {
                             // Trait implementation
@@ -1452,23 +1377,6 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
 
         trace!("{:?}", name);
         Ok(Name { name })
-    }
-
-    pub(crate) fn make_hax_state_with_id(
-        &mut self,
-        def_id: DefId,
-    ) -> hax::State<hax::Base<'tcx>, (), (), DefId> {
-        hax::state::State {
-            thir: (),
-            mir: (),
-            owner_id: def_id,
-            base: hax::Base::new(
-                self.tcx,
-                hax::options::Options {
-                    inline_macro_calls: Vec::new(),
-                },
-            ),
-        }
     }
 
     /// Returns an optional name for an HIR item.

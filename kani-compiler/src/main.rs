@@ -17,9 +17,13 @@
 extern crate rustc_abi;
 extern crate rustc_ast;
 extern crate rustc_ast_pretty;
+#[cfg(feature = "aeneas")]
+extern crate rustc_attr;
 extern crate rustc_codegen_ssa;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
+#[cfg(feature = "aeneas")]
+extern crate rustc_error_messages;
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_index;

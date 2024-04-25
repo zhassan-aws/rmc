@@ -28,12 +28,12 @@ impl<I: Idx> Generator<I> {
 }
 
 #[derive(Debug, Clone)]
-pub struct MapGenerator<K: Eq + Hash + Ord, I: Idx> {
+pub struct MapGenerator<K: Eq + Hash, I: Idx> {
     counter: Generator<I>,
     map: HashMap<K, I>,
 }
 
-impl<K: Eq + Hash + Ord, I: Idx> MapGenerator<K, I> {
+impl<K: Eq + Hash, I: Idx> MapGenerator<K, I> {
     pub fn new() -> Self {
         MapGenerator { counter: Generator::new(), map: HashMap::new() }
     }

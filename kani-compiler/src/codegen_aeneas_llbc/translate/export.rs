@@ -1,4 +1,5 @@
 use llbc::llbc_ast;
+use llbc::{error, info};
 use llbc::meta::{FileId, FileName};
 use crate::codegen_aeneas_llbc::translate::reorder_decls::DeclarationGroup;
 use crate::codegen_aeneas_llbc::translate::translate_ctx::*;

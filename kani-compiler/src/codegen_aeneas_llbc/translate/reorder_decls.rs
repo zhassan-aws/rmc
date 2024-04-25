@@ -1,5 +1,6 @@
 use llbc::common::*;
 use llbc::formatter::{AstFormatter, Formatter, IntoFormatter};
+use llbc::trace;
 use llbc::gast::*;
 use crate::codegen_aeneas_llbc::translate::graphs::*;
 use crate::codegen_aeneas_llbc::translate::translate_ctx::TransCtx;
@@ -7,7 +8,7 @@ use llbc::types::*;
 use llbc::ullbc_ast::*;
 use hashlink::linked_hash_map::LinkedHashMap;
 use linked_hash_set::LinkedHashSet;
-use macros::{EnumAsGetters, EnumIsA, VariantIndexArity, VariantName};
+use llbc_macros::{EnumAsGetters, EnumIsA, VariantIndexArity, VariantName};
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
 use serde::Serialize;

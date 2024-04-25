@@ -11,12 +11,19 @@ publish = false
 [dependencies]
 cbmc = { path = "../cprover_bindings", package = "cprover_bindings", optional = true }
 clap = { version = "4.4.11", features = ["derive", "cargo"] }
+colored = { version = "2.0.4", optional = true }
+hashlink = { version = "0.7.0", optional = true }
 home = "0.5"
+im = { version = "15.1.0", optional = true }
 itertools = "0.12"
 kani_metadata = {path = "../kani_metadata"}
 lazy_static = "1.4.0"
+linked_hash_set = { version = "0.1.4", optional = true }
 llbc = { path = "../llbc", optional = true }
+llbc_macros = { path = "../llbc/macros", package = "macros", optional = true }
+log = { version = "0.4.17", optional = true }
 num = { version = "0.4.0", optional = true }
+petgraph = { version = "0.6.2", optional = true }
 regex = "1.7.0"
 serde = { version = "1", optional = true }
 serde_json = "1"
@@ -29,7 +36,7 @@ tracing-subscriber = {version = "0.3.8", features = ["env-filter", "json", "fmt"
 # Future proofing: enable backend dependencies using feature.
 [features]
 default = ['aeneas', 'cprover']
-aeneas = ['llbc']
+aeneas = ['colored', 'hashlink', 'im', 'linked_hash_set', 'log', 'llbc', 'llbc_macros', 'petgraph']
 cprover = ['cbmc', 'num', 'serde']
 write_json_symtab = []
 

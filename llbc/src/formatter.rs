@@ -6,6 +6,7 @@ use crate::types::*;
 use crate::ullbc_ast;
 use crate::ullbc_ast as ast;
 use crate::values::*;
+use std::fmt;
 
 /// [`Formatter`](Formatter) is a trait for converting objects to string.
 ///
@@ -255,6 +256,23 @@ impl<'a> FmtCtx<'a> {
         }
     }
 }
+
+impl<'a> FmtCtx<'a> {
+    pub fn fmt_decl_group<Id: Copy>(
+        &self,
+        f: &mut fmt::Formatter,
+        ids: &Vec<Id>,
+    ) -> fmt::Result
+    where
+        Self: DeclFormatter<Id>,
+    {
+        for id in ids {
+            writeln!(f, "{}\n", self.format_decl(*id))?
+        }
+        fmt::Result::Ok(())
+    }
+}
+
 
 impl<'a> Default for FmtCtx<'a> {
     fn default() -> Self {
