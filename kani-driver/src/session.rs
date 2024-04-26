@@ -5,6 +5,7 @@ use crate::args::common::Verbosity;
 use crate::args::VerificationArgs;
 use crate::util::render_command;
 use anyhow::{bail, Context, Result};
+use kani_metadata::UnstableFeature;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -84,7 +85,7 @@ impl KaniSession {
     pub fn reachability_mode(&self) -> ReachabilityMode {
         if self.codegen_tests {
             ReachabilityMode::Tests
-        } else if self.args.function.is_some() {
+        } else if self.args.function.is_some() || self.args.common_args.unstable_features.contains(UnstableFeature::Aeneas) {
             ReachabilityMode::AllPubFns
         } else {
             ReachabilityMode::ProofHarnesses

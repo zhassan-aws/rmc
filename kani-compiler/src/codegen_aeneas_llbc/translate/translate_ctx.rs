@@ -1,27 +1,25 @@
 //! The translation contexts.
 use llbc::common::*;
-use llbc::formatter::{DeclFormatter, FmtCtx, Formatter, IntoFormatter};
+use llbc::formatter::{FmtCtx, Formatter, IntoFormatter};
 use llbc::gast::*;
 use llbc::llbc_ast;
 use llbc::meta::{self, Attribute, Span};
-use llbc::meta::{FileId, FileName, InlineAttr, LocalFileId, Meta, VirtualFileId};
+use llbc::meta::{FileId, FileName, InlineAttr, LocalFileId, VirtualFileId};
 use llbc::names::{Disambiguator, ImplElem, ImplElemKind, Name, PathElem};
-use crate::codegen_aeneas_llbc::translate::reorder_decls::{AnyTransId, DeclarationGroup, DeclarationsGroups, GDeclarationGroup};
+use crate::codegen_aeneas_llbc::translate::reorder_decls::{AnyTransId, DeclarationGroup, DeclarationsGroups};
 //use crate::translate_predicates::NonLocalTraitClause;
 use llbc::{error, trace};
 use llbc::types::*;
 use llbc::ullbc_ast as ast;
-use im::OrdMap;
 use linked_hash_set::LinkedHashSet;
 use llbc_macros::VariantIndexArity;
 use rustc_error_messages::MultiSpan;
 use rustc_hir::def_id::DefId;
 use rustc_hir::Node as HirNode;
-use rustc_hir::Item;
+use rustc_hir::{Item, ItemKind};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
-use std::cmp::{Ord, Ordering, PartialOrd};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 macro_rules! register_error_or_panic {
@@ -117,7 +115,7 @@ impl CrateInfo {
 /// make sure we translate them in a specific order (top-level constants
 /// before constant functions before functions...). This allows us to
 /// avoid stealing issues when looking up the MIR bodies.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, VariantIndexArity)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, VariantIndexArity)]
 pub enum OrdRustId {
     Global(DefId),
     ConstFun(DefId),
@@ -165,7 +163,7 @@ pub struct TransCtx<'tcx, 'ctx> {
     /// The declarations we came accross and which we haven't translated yet.
     /// We use an ordered set to make sure we translate them in a specific
     /// order (this avoids stealing issues when querying the MIR bodies).
-    pub stack: BTreeSet<OrdRustId>,
+    pub stack: HashSet<OrdRustId>,
     /// The id of the definition we are exploring
     pub def_id: Option<DefId>,
     /// File names to ids and vice-versa
@@ -359,48 +357,6 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
         }
     }
 
-    /// Compute meta data from a Rust source scope
-    pub fn translate_meta_from_source_info(
-        &mut self,
-        source_scopes: &hax::IndexVec<hax::SourceScope, hax::SourceScopeData>,
-        source_info: &hax::SourceInfo,
-    ) -> Meta {
-        // Translate the span
-        let mut scope_data = source_scopes.get(source_info.scope).unwrap();
-        let span = self.translate_span();//scope_data.span.clone());
-
-        // Lookup the top-most inlined parent scope.
-        if scope_data.inlined_parent_scope.is_some() {
-            while scope_data.inlined_parent_scope.is_some() {
-                let parent_scope = scope_data.inlined_parent_scope.unwrap();
-                scope_data = source_scopes.get(parent_scope).unwrap();
-            }
-
-            let parent_span = self.translate_span();//scope_data.span.clone());
-
-            Meta {
-                span: parent_span,
-                generated_from_span: Some(span),
-            }
-        } else {
-            Meta {
-                span,
-                generated_from_span: None,
-            }
-        }
-    }
-
-    // TODO: rename
-    pub(crate) fn translate_meta_from_rspan(&mut self, rspan: hax::Span) -> Meta {
-        // Translate the span
-        let span = self.translate_span();//rspan);
-
-        Meta {
-            span,
-            generated_from_span: None,
-        }
-    }
-
     /// Returns the attributes (`#[...]`) of this item.
     pub(crate) fn item_attributes(&self, id: DefId) -> &[rustc_ast::Attribute] {
         use rustc_hir::hir_id::HirId;
@@ -448,7 +404,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
 
     /// Returns the visibility of the item/field/etc. Returns `None` for items that don't have a
     /// visibility, like impl blocks.
-    pub(crate) fn translate_visibility_from_rid(&mut self, id: DefId, span: Span) -> Option<bool> {
+    pub(crate) fn translate_visibility_from_rid(&mut self, id: DefId, _span: Span) -> Option<bool> {
         use rustc_hir::def::DefKind::*;
         let def_kind = self.tcx.def_kind(id);
         match def_kind {
@@ -483,11 +439,11 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
             | OpaqueTy
             | TyParam
             | Variant => {
-                register_error_or_panic!(
-                    self,
-                    span,
-                    "Called `translate_visibility_from_rid` on `{def_kind:?}`"
-                );
+                //register_error_or_panic!(
+                //    self,
+                //    span,
+                //    "Called `translate_visibility_from_rid` on `{def_kind:?}`"
+                //);
                 None
             }
         }
@@ -496,8 +452,8 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
     /// Whether this item is in an `extern { .. }` block, in which case it has no body.
     pub(crate) fn id_is_extern_item(&mut self, id: DefId) -> bool {
         id.as_local().is_some_and(|local_def_id| {
-            let node = self.tcx.hir().find_by_def_id(local_def_id);
-            matches!(node, Some(HirNode::ForeignItem(_)))
+            let node = self.tcx.hir_node_by_def_id(local_def_id);
+            matches!(node, HirNode::ForeignItem(_))
         })
     }
 
@@ -700,15 +656,15 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
 
     pub(crate) fn iter_bodies<F, B>(
         &mut self,
-        funs: &mut FunDeclId::Map<GFunDecl<B>>,
-        globals: &mut GlobalDeclId::Map<GGlobalDecl<B>>,
-        f: F,
+        _funs: &mut FunDeclId::Map<GFunDecl<B>>,
+        _globals: &mut GlobalDeclId::Map<GGlobalDecl<B>>,
+        _f: F,
     ) where
         F: Fn(&mut Self, &Name, &mut GExprBody<B>),
     {
-        for (id, name, b) in iter_function_bodies(funs).chain(iter_global_bodies(globals)) {
-            self.with_def_id(id, |ctx| f(ctx, name, b))
-        }
+        //for (id, name, b) in iter_function_bodies(funs).chain(iter_global_bodies(globals)) {
+        //    self.with_def_id(id, |ctx| f(ctx, name, b))
+        //}
     }
 }
 
@@ -724,7 +680,6 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
             def_id,
             t_ctx,
             region_vars: im::vector![RegionId::Vector::new()],
-            free_region_vars: std::collections::BTreeMap::new(),
             bound_region_vars: im::Vector::new(),
             type_vars: TypeVarId::Vector::new(),
             type_vars_map: TypeVarId::MapGenerator::new(),
@@ -733,14 +688,11 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
             const_generic_vars: ConstGenericVarId::Vector::new(),
             const_generic_vars_map: ConstGenericVarId::MapGenerator::new(),
             trait_instance_id_gen,
-            trait_clauses: OrdMap::new(),
             registering_trait_clauses: false,
             regions_outlive: Vec::new(),
             types_outlive: Vec::new(),
             trait_type_constraints: Vec::new(),
             blocks: im::OrdMap::new(),
-            blocks_map: ast::BlockId::MapGenerator::new(),
-            blocks_stack: VecDeque::new(),
         }
     }
 
@@ -750,20 +702,6 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
 
     pub fn span_err(&mut self, span: rustc_span::Span, msg: &str) {
         self.t_ctx.span_err(span, msg)
-    }
-
-    pub(crate) fn translate_meta_from_rspan(&mut self, rspan: hax::Span) -> Meta {
-        self.t_ctx.translate_meta_from_rspan(rspan)
-    }
-
-    pub(crate) fn get_local(&self, local: &hax::Local) -> Option<VarId::Id> {
-        use rustc_index::Idx;
-        self.vars_map.get(&local.index())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn get_block_id_from_rid(&self, rid: hax::BasicBlock) -> Option<ast::BlockId::Id> {
-        self.blocks_map.get(&rid)
     }
 
     pub(crate) fn get_var_from_id(&self, var_id: VarId::Id) -> Option<&ast::Var> {
@@ -821,20 +759,6 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
 
     /// Push a free region.
     ///
-    /// Important: we must push *all* the free regions (which are early-bound
-    /// regions) before pushing any (late-)bound region.
-    pub(crate) fn push_free_region(
-        &mut self,
-        r: hax::Region,
-        name: Option<String>,
-    ) -> RegionId::Id {
-        // Check that there are no late-bound regions
-        assert!(self.bound_region_vars.is_empty());
-        let rid = self.region_vars[0].push_with(|index| RegionVar { index, name });
-        self.free_region_vars.insert(r, rid);
-        rid
-    }
-
     /// Set the first bound regions group
     pub(crate) fn set_first_bound_regions_group(&mut self, names: Vec<Option<String>>) {
         assert!(self.bound_region_vars.is_empty());
@@ -902,13 +826,6 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
             .push_with(|index| (ConstGenericVar { index, name, ty }));
     }
 
-    pub(crate) fn fresh_block_id(&mut self, rid: hax::BasicBlock) -> ast::BlockId::Id {
-        // Push to the stack of blocks awaiting translation
-        self.blocks_stack.push_back(rid);
-        // Insert in the map
-        self.blocks_map.insert(rid)
-    }
-
     pub(crate) fn push_block(&mut self, id: ast::BlockId::Id, block: ast::BlockData) {
         self.blocks.insert(id, block);
     }
@@ -926,35 +843,37 @@ impl<'tcx, 'ctx, 'ctx1> BodyTransCtx<'tcx, 'ctx, 'ctx1> {
     /// Retrieve the *local* trait clauses available in the current environment
     /// (we filter the parent of those clauses, etc.).
     pub(crate) fn get_local_trait_clauses(&self) -> Vec<TraitClause> {
-        let clauses: Vec<TraitClause> = self
-            .trait_clauses
-            .iter()
-            .filter_map(|(_, x)| x.to_local_trait_clause())
-            .collect();
-        // Sanity check
-        if !llbc::assumed::IGNORE_BUILTIN_MARKER_TRAITS {
-            assert!(clauses
-                .iter()
-                .enumerate()
-                .all(|(i, c)| c.clause_id.index() == i));
-        }
+        let clauses = Vec::new();
+        //let clauses: Vec<TraitClause> = self
+        //    .trait_clauses
+        //    .iter()
+        //    .filter_map(|(_, x)| x.to_local_trait_clause())
+        //    .collect();
+        //// Sanity check
+        //if !llbc::assumed::IGNORE_BUILTIN_MARKER_TRAITS {
+        //    assert!(clauses
+        //        .iter()
+        //        .enumerate()
+        //        .all(|(i, c)| c.clause_id.index() == i));
+        //}
         // Return
         clauses
     }
 
     pub(crate) fn get_parent_trait_clauses(&self) -> TraitClauseId::Vector<TraitClause> {
-        let clauses: TraitClauseId::Vector<TraitClause> = self
-            .trait_clauses
-            .iter()
-            .filter_map(|(_, x)| {
-                x.to_trait_clause_with_id(&|id| match id {
-                    TraitInstanceId::ParentClause(box TraitInstanceId::SelfId, _, id) => Some(*id),
-                    _ => None,
-                })
-            })
-            .collect();
-        // Sanity check
-        assert!(clauses.iter_indexed_values().all(|(i, c)| c.clause_id == i));
+        let clauses: TraitClauseId::Vector<TraitClause> = TraitClauseId::Vector::new();
+        //let clauses: TraitClauseId::Vector<TraitClause> = self
+        //    .trait_clauses
+        //    .iter()
+        //    .filter_map(|(_, x)| {
+        //        x.to_trait_clause_with_id(&|id| match id {
+        //            TraitInstanceId::ParentClause(box TraitInstanceId::SelfId, _, id) => Some(*id),
+        //            _ => None,
+        //        })
+        //    })
+        //    .collect();
+        //// Sanity check
+        //assert!(clauses.iter_indexed_values().all(|(i, c)| c.clause_id == i));
         clauses
     }
 
@@ -1308,7 +1227,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                     //    .translate_generic_params_from_hax(span, &substs)
                     //    .unwrap();
                     bt_ctx.translate_predicates_of(None, id).unwrap();
-                    let erase_regions = false;
+                    //let erase_regions = false;
                     // Two cases, depending on whether the impl block is
                     // a "regular" impl block (`impl Foo { ... }`) or a trait
                     // implementation (`impl Bar for Foo { ... }`).
@@ -1318,18 +1237,8 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                             //let ty = bt_ctx.translate_ty(span, erase_regions, &ty).unwrap();
                             ImplElemKind::Ty(Ty::Never)
                         }
-                        Some(trait_ref) => {
-                            // Trait implementation
-                            let trait_ref = trait_ref.sinto(&bt_ctx.hax_state);
-                            let erase_regions = false;
-                            let trait_ref =
-                                bt_ctx.translate_trait_decl_ref(span, erase_regions, &trait_ref)?;
-                            match trait_ref {
-                                None => error_or_panic!(self, span, "The trait reference was ignored while we need it to compute the name"),
-                                Some(trait_ref) => {
-                                    ImplElemKind::Trait(trait_ref)
-                                }
-                            }
+                        Some(_trait_ref) => {
+                            todo!()
                         }
                     };
 
@@ -1340,9 +1249,6 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                         kind,
                     }));
                 }
-                DefPathData::ImplTrait => {
-                    // TODO: do nothing for now
-                }
                 DefPathData::MacroNs(symbol) => {
                     assert!(data.disambiguator == 0); // Sanity check
 
@@ -1352,12 +1258,6 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
                     // in the AST, and only use macro names in [register], for
                     // instance to filter opaque modules.
                     name.push(PathElem::Ident(symbol.to_string(), disambiguator));
-                }
-                DefPathData::ClosureExpr => {
-                    // TODO: this is not very satisfactory, but on the other hand
-                    // we should be able to extract closures in local let-bindings
-                    // (i.e., we shouldn't have to introduce top-level let-bindings).
-                    name.push(PathElem::Ident("closure".to_string(), disambiguator))
                 }
                 DefPathData::ForeignMod => {
                     // Do nothing, functions in `extern` blocks are in the same namespace as the
@@ -1408,7 +1308,7 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
             | ItemKind::Impl(_)
             | ItemKind::Mod(_)
             | ItemKind::ForeignMod { .. }
-            | ItemKind::Const(_, _)
+            | ItemKind::Const(_, _, _)
             | ItemKind::Static(_, _, _)
             | ItemKind::Macro(_, _)
             | ItemKind::Trait(..) => Option::Some(self.def_id_to_name(def_id)?),
@@ -1417,10 +1317,5 @@ impl<'tcx, 'ctx> TransCtx<'tcx, 'ctx> {
             }
         };
         Ok(name)
-    }
-
-    pub fn hax_def_id_to_name(&mut self, def_id: &hax::DefId) -> Result<Name, Error> {
-        // We have to create a hax state, which is annoying...
-        self.def_id_to_name(DefId::from(def_id))
     }
 }
