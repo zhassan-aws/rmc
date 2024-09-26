@@ -16,6 +16,7 @@ use crate::project::Project;
 use crate::session::KaniSession;
 use crate::version::print_kani_version;
 use clap::Parser;
+use kani_metadata::UnstableFeature;
 use tracing::debug;
 
 mod args;
@@ -88,7 +89,7 @@ fn cargokani_main(input_args: Vec<OsString>) -> Result<()> {
     }
 
     let project = project::cargo_project(&session, false)?;
-    if session.args.only_codegen { Ok(()) } else { verify_project(project, session) }
+    if session.args.only_codegen || session.args.common_args.unstable_features.contains(UnstableFeature::Aeneas) { Ok(()) } else { verify_project(project, session) }
 }
 
 /// The main function for the `kani` command.

@@ -9,12 +9,13 @@ use crate::session::KaniSession;
 use crate::util::crate_name;
 use anyhow::{Context, Result};
 use kani_metadata::{
-    artifact::convert_type, ArtifactType, ArtifactType::*, HarnessMetadata, KaniMetadata,
+    artifact::convert_type, ArtifactType, ArtifactType::*, HarnessMetadata, KaniMetadata, UnstableFeature,
 };
 use std::env::current_dir;
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::{debug, trace};
 
 /// This structure represent the project information relevant for verification.
@@ -179,6 +180,24 @@ pub fn cargo_project(session: &KaniSession, keep_going: bool) -> Result<Project>
     // For the MIR Linker we know there is only one metadata per crate. Use that in our favor.
     let metadata =
         outputs.metadata.iter().map(|md_file| from_json(md_file)).collect::<Result<Vec<_>>>()?;
+    
+    let metadata = if session.args.common_args.unstable_features.contains(UnstableFeature::Aeneas) {
+        let llbc_files: Vec<PathBuf> = metadata.iter().flat_map(|artifact: &KaniMetadata| artifact.proof_harnesses.iter().map(|md| {
+            let mut file = md.goto_file.as_ref().unwrap().clone();
+            file.set_extension("llbc");
+            file
+        })).collect();
+        for llbc_file in llbc_files {
+            let mut cmd = Command::new("aeneas");
+            cmd.arg("-backend");
+            cmd.arg("lean");
+            cmd.arg(llbc_file);
+            session.run_terminal(cmd)?;
+        }
+        Vec::new()
+    } else {
+        metadata
+    };
     Project::try_new(
         session,
         outdir,

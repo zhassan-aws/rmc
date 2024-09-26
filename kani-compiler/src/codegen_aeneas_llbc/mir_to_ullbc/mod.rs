@@ -45,7 +45,7 @@ use stable_mir::abi::PassMode;
 use stable_mir::mir::mono::Instance;
 use stable_mir::mir::{
     BasicBlock, BinOp, Body, BorrowKind, CastKind, ConstOperand, Mutability, Operand, Place,
-    ProjectionElem, Rvalue, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind,
+    ProjectionElem, Rvalue, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind, VarDebugInfoContents,
 };
 use stable_mir::ty::{
     Allocation, ConstantKind, IndexedVal, IntTy, MirConst, Region, RegionKind, RigidTy, Span, Ty,
@@ -461,12 +461,29 @@ impl<'a, 'tcx> Context<'a, 'tcx> {
         // - the input arguments
         // - the remaining locals, used for the intermediate computations
         let mut locals = Vector::new();
-        {
-            let mut add_variable = make_locals_generator(&mut locals);
-            mir_body.local_decls().for_each(|(_, local)| {
-                add_variable(self.translate_ty(local.ty));
+        //{
+        //    let mut add_variable = make_locals_generator(&mut locals);
+        //    mir_body.local_decls().for_each(|(l, local)| {
+        //        add_variable(self.translate_ty(local.ty));
+        //    });
+        //}
+        mir_body.local_decls().for_each(|(lc, ldata)| {
+            let ty = self.translate_ty(ldata.ty);
+            let debug_info = mir_body.var_debug_info.iter().find(|info| match &info.value {
+                VarDebugInfoContents::Place(p) => p.local == lc && p.projection.len() == 0,
+                VarDebugInfoContents::Const(_) => false,
             });
-        }
+            let name = if let Some(debug_info) = debug_info {
+                Some(debug_info.name.clone())
+            } else {
+                None
+            };
+            locals.push_with(|index| Var {
+                index,
+                name,
+                ty,
+            });
+        });
         locals
     }
 
